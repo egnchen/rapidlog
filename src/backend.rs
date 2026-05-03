@@ -3,8 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use crate::arg;
 use crate::logger::Logger;
-use crate::message::{ArchivedLogMessage, LogMessage};
+use crate::message::{ARCHIVED_HEADER_SIZE, ArchivedLogMessage, LogMessage};
 use crate::metadata::Metadata;
 use crate::thread_context::ThreadContext;
 
@@ -107,11 +108,21 @@ impl Backend {
     fn format_message(archived: &ArchivedLogMessage) -> String {
         let timestamp_ns = archived.timestamp_ns;
         let metadata: &Metadata = unsafe { &*(archived.metadata_ptr as usize as *const Metadata) };
+        let args_len = archived.args_len as usize;
 
         let secs = timestamp_ns / 1_000_000_000;
         let nanos = (timestamp_ns % 1_000_000_000) as u32;
 
-        let body = std::str::from_utf8(&archived.args_data).unwrap_or("<invalid utf8>");
+        let body = if args_len > 0 {
+            let archived_ptr = archived as *const ArchivedLogMessage as *const u8;
+            let args_bytes = unsafe {
+                std::slice::from_raw_parts(archived_ptr.add(ARCHIVED_HEADER_SIZE), args_len)
+            };
+            let decoded = arg::decode_args(args_bytes);
+            arg::format_with_args(metadata.format_str, &decoded)
+        } else {
+            metadata.format_str.to_string()
+        };
 
         format!(
             "[{}.{:09}] [{:?}] {}:{} {body}",
@@ -123,6 +134,7 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arg::LogArg;
     use crate::level::LogLevel;
     use crate::logger::Logger;
     use crate::sink::Sink;
@@ -170,17 +182,28 @@ mod tests {
             "test",
         )));
 
+        let arg_count: usize = 1;
+        let header_size = 1 + arg_count; // count byte + 1 tag
+        let payload_size = 8; // 1 int
+        let args_len = header_size + payload_size;
+        let total_size = ARCHIVED_HEADER_SIZE + args_len;
+        let mut buf = vec![0u8; total_size];
+
         let msg = LogMessage::new(
             1_700_000_000_123_456_789,
             meta,
             Arc::as_ptr(&logger),
-            vec![],
+            args_len as u16,
         );
+        msg.serialize_header_into(&mut buf[..ARCHIVED_HEADER_SIZE]);
 
-        let encoded = msg.encode().unwrap();
+        buf[ARCHIVED_HEADER_SIZE] = 1; // arg_count
+        buf[ARCHIVED_HEADER_SIZE + 1] = arg::TAG_INT;
+
+        (42i32).log_encode(&mut buf[ARCHIVED_HEADER_SIZE + 2..]);
 
         ThreadContext::init();
-        ThreadContext::push(&encoded).unwrap();
+        ThreadContext::push(&buf).unwrap();
 
         let backend = Backend::start(BackendOptions {
             sleep_duration: Duration::from_millis(1),
@@ -200,26 +223,32 @@ mod tests {
     fn format_message_output() {
         let meta = Box::leak(Box::new(Metadata::new(
             LogLevel::Warning,
-            "fmt: {}",
+            "fmt: {} {}",
             "src/main.rs",
             42,
             "my_crate",
         )));
 
         let logger = Logger::new("test_logger".to_string(), vec![]);
-        let msg = LogMessage::new(
-            1_700_000_001,
-            meta,
-            Arc::as_ptr(&logger),
-            b"formatted body".to_vec(),
-        );
-        let encoded = msg.encode().unwrap();
-        let archived = LogMessage::decode(&encoded).unwrap();
+        let total_size = ARCHIVED_HEADER_SIZE + 1 + 2 + 8 + 8;
+        let mut buf = vec![0u8; total_size];
 
+        let args_len = 1 + 2 + 8 + 8; // count(1) + tags(2) + int(8) + int(8) = 19
+        let msg = LogMessage::new(1_700_000_001, meta, Arc::as_ptr(&logger), args_len as u16);
+        msg.serialize_header_into(&mut buf[..ARCHIVED_HEADER_SIZE]);
+
+        buf[ARCHIVED_HEADER_SIZE] = 2; // arg_count
+        buf[ARCHIVED_HEADER_SIZE + 1] = arg::TAG_INT;
+        buf[ARCHIVED_HEADER_SIZE + 2] = arg::TAG_INT;
+        (123i32).log_encode(&mut buf[ARCHIVED_HEADER_SIZE + 3..]);
+        (456i32).log_encode(&mut buf[ARCHIVED_HEADER_SIZE + 3 + 8..]);
+
+        let archived = LogMessage::decode(&buf).unwrap();
         let formatted = Backend::format_message(archived);
+
+        assert!(formatted.contains("fmt: 123 456"), "got: {formatted}");
         assert!(formatted.contains("[Warning]"), "got: {formatted}");
         assert!(formatted.contains("src/main.rs:42"), "got: {formatted}");
-        assert!(formatted.contains("formatted body"), "got: {formatted}");
     }
 
     #[test]
@@ -236,10 +265,13 @@ mod tests {
             "test",
         )));
 
-        // Push messages out of order
-        for ts in [300, 100, 200] {
-            let msg = LogMessage::new(ts, meta, Arc::as_ptr(&logger), vec![]);
-            ThreadContext::push(&msg.encode().unwrap()).unwrap();
+        for ts in [300u64, 100, 200] {
+            let total_size = ARCHIVED_HEADER_SIZE + 1; // count=0, no args
+            let mut buf = vec![0u8; total_size];
+            let msg = LogMessage::new(ts, meta, Arc::as_ptr(&logger), 1);
+            msg.serialize_header_into(&mut buf[..ARCHIVED_HEADER_SIZE]);
+            buf[ARCHIVED_HEADER_SIZE] = 0; // arg_count = 0
+            ThreadContext::push(&buf).unwrap();
         }
 
         let backend = Backend::start(BackendOptions {

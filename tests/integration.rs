@@ -101,7 +101,7 @@ fn integration_multi_thread_logging() {
         let handle = thread::spawn(move || {
             Frontend::preallocate();
             for i in 0..msgs_per_thread {
-                rapidlog::log_info!(logger, "thread_{t}_msg_{i}");
+                rapidlog::log_info!(logger, "thread_{}_msg_{}", t, i);
             }
         });
         handles.push(handle);

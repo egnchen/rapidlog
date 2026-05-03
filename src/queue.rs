@@ -2,6 +2,8 @@ use rtrb::{Consumer as RtrbConsumer, Producer as RtrbProducer, RingBuffer};
 
 pub const DEFAULT_QUEUE_CAPACITY: usize = 131_072;
 
+pub const HEADER_SIZE: usize = 8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushError {
     Full,
@@ -22,20 +24,53 @@ pub fn create_queue(capacity: usize) -> (SpscProducer, SpscConsumer) {
 
 impl SpscProducer {
     pub fn push(&mut self, data: &[u8]) -> Result<(), PushError> {
-        let len = data.len() as u32;
-        let header = len.to_ne_bytes();
-        let total = 4 + data.len();
+        let msg_len = data.len();
+        let total = HEADER_SIZE + msg_len;
+        let padded = (total + 7) & !7;
 
-        if self.inner.slots() < total {
+        if self.inner.slots() < padded {
             return Err(PushError::Full);
         }
 
-        let chunk = self
+        let mut chunk = self
             .inner
-            .write_chunk_uninit(total)
+            .write_chunk_uninit(padded)
             .map_err(|_| PushError::Full)?;
-        let iter = header.into_iter().chain(data.iter().copied());
-        chunk.fill_from_iter(iter);
+
+        let (first, second) = chunk.as_mut_slices();
+        let first_ptr = first.as_mut_ptr() as *mut u8;
+
+        unsafe {
+            std::ptr::write_bytes(first_ptr, 0, first.len());
+            if !second.is_empty() {
+                std::ptr::write_bytes(second.as_mut_ptr() as *mut u8, 0, second.len());
+            }
+
+            let len_bytes = (msg_len as u32).to_ne_bytes();
+
+            if padded <= first.len() {
+                std::ptr::copy_nonoverlapping(len_bytes.as_ptr(), first_ptr, 4);
+                std::ptr::copy_nonoverlapping(data.as_ptr(), first_ptr.add(HEADER_SIZE), msg_len);
+            } else {
+                let first_data = first.len() - HEADER_SIZE;
+                std::ptr::copy_nonoverlapping(len_bytes.as_ptr(), first_ptr, 4);
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr(),
+                    first_ptr.add(HEADER_SIZE),
+                    first_data,
+                );
+                let second_ptr = second.as_mut_ptr() as *mut u8;
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr().add(first_data),
+                    second_ptr,
+                    msg_len - first_data,
+                );
+            }
+        }
+
+        unsafe {
+            chunk.commit(padded);
+        }
         Ok(())
     }
 }
@@ -43,14 +78,14 @@ impl SpscProducer {
 impl SpscConsumer {
     pub fn pop(&mut self) -> Option<Vec<u8>> {
         let slots = self.inner.slots();
-        if slots < 4 {
+        if slots < HEADER_SIZE {
             return None;
         }
 
         let chunk = self.inner.read_chunk(slots).ok()?;
         let (first, second) = chunk.as_slices();
 
-        if first.len() < 4 {
+        if first.len() < HEADER_SIZE {
             return None;
         }
 
@@ -58,23 +93,25 @@ impl SpscConsumer {
         len_buf.copy_from_slice(&first[..4]);
         let msg_len = u32::from_ne_bytes(len_buf) as usize;
 
-        let total_msg = 4 + msg_len;
+        let padded = (HEADER_SIZE + msg_len + 7) & !7;
         let available = first.len() + second.len();
-        if available < total_msg {
+        if available < padded {
             return None;
         }
 
         let mut msg = Vec::with_capacity(msg_len);
 
-        let first_payload_end = total_msg.min(first.len());
-        msg.extend_from_slice(&first[4..first_payload_end]);
-
-        let remaining = total_msg.saturating_sub(first.len());
-        if remaining > 0 {
-            msg.extend_from_slice(&second[..remaining]);
+        let first_payload = (first.len() - HEADER_SIZE).min(msg_len);
+        if first_payload > 0 {
+            msg.extend_from_slice(&first[HEADER_SIZE..HEADER_SIZE + first_payload]);
         }
 
-        chunk.commit(total_msg);
+        let remaining = msg_len.saturating_sub(first_payload);
+        if remaining > 0 {
+            msg.extend_from_slice(&second[..remaining.min(second.len())]);
+        }
+
+        chunk.commit(padded);
         Some(msg)
     }
 

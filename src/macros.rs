@@ -1,25 +1,60 @@
 #[macro_export]
 macro_rules! log_trace_l3 {
-    ($logger:expr, $($arg:tt)*) => {
+    ($logger:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {
         {
             const _META: &$crate::metadata::Metadata = &$crate::metadata::Metadata::new(
                 $crate::level::LogLevel::TraceL3,
-                stringify!($($arg)*),
+                $fmt,
                 file!(),
                 line!(),
                 module_path!(),
             );
             #[allow(unused_unsafe)]
             if unsafe { ($crate::logger::Logger::log_level(&*std::sync::Arc::as_ptr(&($logger)))) }.as_usize() <= $crate::level::LogLevel::TraceL3.as_usize() {
-                let _formatted = format!($($arg)*);
-                let _msg = $crate::message::LogMessage::new(
-                    0u64,
-                    _META,
-                    std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
-                    _formatted.into_bytes(),
-                );
-                if let Ok(_encoded) = _msg.encode() {
-                    $crate::thread_context::ThreadContext::push(&_encoded).ok();
+                let _arg_count: usize = 0 $(+ { let _ = &$arg; 1 })*;
+                let _tags_size = 1 + _arg_count;
+                let _payloads_size: usize = 0 $(+ $crate::arg::LogArg::log_max_size(&$arg))*;
+                let _total_args = _tags_size + _payloads_size;
+                let _total_msg = $crate::message::ARCHIVED_HEADER_SIZE + _total_args;
+
+                if _total_msg <= 512 {
+                    let mut __buf = [0u8; 512];
+                    let msg = $crate::message::LogMessage::new(
+                        0u64, _META,
+                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
+                        _total_args as u16,
+                    );
+                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
+                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
+                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
+                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
+                    $({
+                        let __a = &$arg;
+                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
+                        __tp += 1;
+                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
+                        __dp += __w;
+                    })*
+                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
+                } else {
+                    let mut __buf = ::std::vec![0u8; _total_msg];
+                    let msg = $crate::message::LogMessage::new(
+                        0u64, _META,
+                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
+                        _total_args as u16,
+                    );
+                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
+                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
+                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
+                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
+                    $({
+                        let __a = &$arg;
+                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
+                        __tp += 1;
+                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
+                        __dp += __w;
+                    })*
+                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
                 }
             }
         }
@@ -28,26 +63,61 @@ macro_rules! log_trace_l3 {
 
 #[macro_export]
 macro_rules! log_trace_l2 {
-    ($logger:expr, $($arg:tt)*) => {
+    ($logger:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {
         {
             const _META: &$crate::metadata::Metadata = &$crate::metadata::Metadata::new(
                 $crate::level::LogLevel::TraceL2,
-                stringify!($($arg)*),
+                $fmt,
                 file!(),
                 line!(),
                 module_path!(),
             );
             #[allow(unused_unsafe)]
             if unsafe { ($crate::logger::Logger::log_level(&*std::sync::Arc::as_ptr(&($logger)))) }.as_usize() <= $crate::level::LogLevel::TraceL2.as_usize() {
-                let _formatted = format!($($arg)*);
-                let _msg = $crate::message::LogMessage::new(
-                    0u64,
-                    _META,
-                    std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
-                    _formatted.into_bytes(),
-                );
-                if let Ok(_encoded) = _msg.encode() {
-                    $crate::thread_context::ThreadContext::push(&_encoded).ok();
+                let _arg_count: usize = 0 $(+ { let _ = &$arg; 1 })*;
+                let _tags_size = 1 + _arg_count;
+                let _payloads_size: usize = 0 $(+ $crate::arg::LogArg::log_max_size(&$arg))*;
+                let _total_args = _tags_size + _payloads_size;
+                let _total_msg = $crate::message::ARCHIVED_HEADER_SIZE + _total_args;
+
+                if _total_msg <= 512 {
+                    let mut __buf = [0u8; 512];
+                    let msg = $crate::message::LogMessage::new(
+                        0u64, _META,
+                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
+                        _total_args as u16,
+                    );
+                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
+                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
+                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
+                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
+                    $({
+                        let __a = &$arg;
+                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
+                        __tp += 1;
+                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
+                        __dp += __w;
+                    })*
+                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
+                } else {
+                    let mut __buf = ::std::vec![0u8; _total_msg];
+                    let msg = $crate::message::LogMessage::new(
+                        0u64, _META,
+                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
+                        _total_args as u16,
+                    );
+                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
+                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
+                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
+                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
+                    $({
+                        let __a = &$arg;
+                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
+                        __tp += 1;
+                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
+                        __dp += __w;
+                    })*
+                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
                 }
             }
         }
@@ -56,26 +126,61 @@ macro_rules! log_trace_l2 {
 
 #[macro_export]
 macro_rules! log_trace_l1 {
-    ($logger:expr, $($arg:tt)*) => {
+    ($logger:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {
         {
             const _META: &$crate::metadata::Metadata = &$crate::metadata::Metadata::new(
                 $crate::level::LogLevel::TraceL1,
-                stringify!($($arg)*),
+                $fmt,
                 file!(),
                 line!(),
                 module_path!(),
             );
             #[allow(unused_unsafe)]
             if unsafe { ($crate::logger::Logger::log_level(&*std::sync::Arc::as_ptr(&($logger)))) }.as_usize() <= $crate::level::LogLevel::TraceL1.as_usize() {
-                let _formatted = format!($($arg)*);
-                let _msg = $crate::message::LogMessage::new(
-                    0u64,
-                    _META,
-                    std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
-                    _formatted.into_bytes(),
-                );
-                if let Ok(_encoded) = _msg.encode() {
-                    $crate::thread_context::ThreadContext::push(&_encoded).ok();
+                let _arg_count: usize = 0 $(+ { let _ = &$arg; 1 })*;
+                let _tags_size = 1 + _arg_count;
+                let _payloads_size: usize = 0 $(+ $crate::arg::LogArg::log_max_size(&$arg))*;
+                let _total_args = _tags_size + _payloads_size;
+                let _total_msg = $crate::message::ARCHIVED_HEADER_SIZE + _total_args;
+
+                if _total_msg <= 512 {
+                    let mut __buf = [0u8; 512];
+                    let msg = $crate::message::LogMessage::new(
+                        0u64, _META,
+                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
+                        _total_args as u16,
+                    );
+                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
+                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
+                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
+                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
+                    $({
+                        let __a = &$arg;
+                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
+                        __tp += 1;
+                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
+                        __dp += __w;
+                    })*
+                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
+                } else {
+                    let mut __buf = ::std::vec![0u8; _total_msg];
+                    let msg = $crate::message::LogMessage::new(
+                        0u64, _META,
+                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
+                        _total_args as u16,
+                    );
+                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
+                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
+                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
+                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
+                    $({
+                        let __a = &$arg;
+                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
+                        __tp += 1;
+                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
+                        __dp += __w;
+                    })*
+                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
                 }
             }
         }
@@ -84,26 +189,61 @@ macro_rules! log_trace_l1 {
 
 #[macro_export]
 macro_rules! log_debug {
-    ($logger:expr, $($arg:tt)*) => {
+    ($logger:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {
         {
             const _META: &$crate::metadata::Metadata = &$crate::metadata::Metadata::new(
                 $crate::level::LogLevel::Debug,
-                stringify!($($arg)*),
+                $fmt,
                 file!(),
                 line!(),
                 module_path!(),
             );
             #[allow(unused_unsafe)]
             if unsafe { ($crate::logger::Logger::log_level(&*std::sync::Arc::as_ptr(&($logger)))) }.as_usize() <= $crate::level::LogLevel::Debug.as_usize() {
-                let _formatted = format!($($arg)*);
-                let _msg = $crate::message::LogMessage::new(
-                    0u64,
-                    _META,
-                    std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
-                    _formatted.into_bytes(),
-                );
-                if let Ok(_encoded) = _msg.encode() {
-                    $crate::thread_context::ThreadContext::push(&_encoded).ok();
+                let _arg_count: usize = 0 $(+ { let _ = &$arg; 1 })*;
+                let _tags_size = 1 + _arg_count;
+                let _payloads_size: usize = 0 $(+ $crate::arg::LogArg::log_max_size(&$arg))*;
+                let _total_args = _tags_size + _payloads_size;
+                let _total_msg = $crate::message::ARCHIVED_HEADER_SIZE + _total_args;
+
+                if _total_msg <= 512 {
+                    let mut __buf = [0u8; 512];
+                    let msg = $crate::message::LogMessage::new(
+                        0u64, _META,
+                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
+                        _total_args as u16,
+                    );
+                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
+                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
+                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
+                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
+                    $({
+                        let __a = &$arg;
+                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
+                        __tp += 1;
+                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
+                        __dp += __w;
+                    })*
+                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
+                } else {
+                    let mut __buf = ::std::vec![0u8; _total_msg];
+                    let msg = $crate::message::LogMessage::new(
+                        0u64, _META,
+                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
+                        _total_args as u16,
+                    );
+                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
+                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
+                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
+                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
+                    $({
+                        let __a = &$arg;
+                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
+                        __tp += 1;
+                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
+                        __dp += __w;
+                    })*
+                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
                 }
             }
         }
@@ -112,26 +252,61 @@ macro_rules! log_debug {
 
 #[macro_export]
 macro_rules! log_info {
-    ($logger:expr, $($arg:tt)*) => {
+    ($logger:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {
         {
             const _META: &$crate::metadata::Metadata = &$crate::metadata::Metadata::new(
                 $crate::level::LogLevel::Info,
-                stringify!($($arg)*),
+                $fmt,
                 file!(),
                 line!(),
                 module_path!(),
             );
             #[allow(unused_unsafe)]
             if unsafe { ($crate::logger::Logger::log_level(&*std::sync::Arc::as_ptr(&($logger)))) }.as_usize() <= $crate::level::LogLevel::Info.as_usize() {
-                let _formatted = format!($($arg)*);
-                let _msg = $crate::message::LogMessage::new(
-                    0u64,
-                    _META,
-                    std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
-                    _formatted.into_bytes(),
-                );
-                if let Ok(_encoded) = _msg.encode() {
-                    $crate::thread_context::ThreadContext::push(&_encoded).ok();
+                let _arg_count: usize = 0 $(+ { let _ = &$arg; 1 })*;
+                let _tags_size = 1 + _arg_count;
+                let _payloads_size: usize = 0 $(+ $crate::arg::LogArg::log_max_size(&$arg))*;
+                let _total_args = _tags_size + _payloads_size;
+                let _total_msg = $crate::message::ARCHIVED_HEADER_SIZE + _total_args;
+
+                if _total_msg <= 512 {
+                    let mut __buf = [0u8; 512];
+                    let msg = $crate::message::LogMessage::new(
+                        0u64, _META,
+                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
+                        _total_args as u16,
+                    );
+                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
+                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
+                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
+                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
+                    $({
+                        let __a = &$arg;
+                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
+                        __tp += 1;
+                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
+                        __dp += __w;
+                    })*
+                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
+                } else {
+                    let mut __buf = ::std::vec![0u8; _total_msg];
+                    let msg = $crate::message::LogMessage::new(
+                        0u64, _META,
+                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
+                        _total_args as u16,
+                    );
+                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
+                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
+                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
+                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
+                    $({
+                        let __a = &$arg;
+                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
+                        __tp += 1;
+                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
+                        __dp += __w;
+                    })*
+                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
                 }
             }
         }
@@ -140,26 +315,61 @@ macro_rules! log_info {
 
 #[macro_export]
 macro_rules! log_warning {
-    ($logger:expr, $($arg:tt)*) => {
+    ($logger:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {
         {
             const _META: &$crate::metadata::Metadata = &$crate::metadata::Metadata::new(
                 $crate::level::LogLevel::Warning,
-                stringify!($($arg)*),
+                $fmt,
                 file!(),
                 line!(),
                 module_path!(),
             );
             #[allow(unused_unsafe)]
             if unsafe { ($crate::logger::Logger::log_level(&*std::sync::Arc::as_ptr(&($logger)))) }.as_usize() <= $crate::level::LogLevel::Warning.as_usize() {
-                let _formatted = format!($($arg)*);
-                let _msg = $crate::message::LogMessage::new(
-                    0u64,
-                    _META,
-                    std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
-                    _formatted.into_bytes(),
-                );
-                if let Ok(_encoded) = _msg.encode() {
-                    $crate::thread_context::ThreadContext::push(&_encoded).ok();
+                let _arg_count: usize = 0 $(+ { let _ = &$arg; 1 })*;
+                let _tags_size = 1 + _arg_count;
+                let _payloads_size: usize = 0 $(+ $crate::arg::LogArg::log_max_size(&$arg))*;
+                let _total_args = _tags_size + _payloads_size;
+                let _total_msg = $crate::message::ARCHIVED_HEADER_SIZE + _total_args;
+
+                if _total_msg <= 512 {
+                    let mut __buf = [0u8; 512];
+                    let msg = $crate::message::LogMessage::new(
+                        0u64, _META,
+                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
+                        _total_args as u16,
+                    );
+                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
+                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
+                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
+                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
+                    $({
+                        let __a = &$arg;
+                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
+                        __tp += 1;
+                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
+                        __dp += __w;
+                    })*
+                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
+                } else {
+                    let mut __buf = ::std::vec![0u8; _total_msg];
+                    let msg = $crate::message::LogMessage::new(
+                        0u64, _META,
+                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
+                        _total_args as u16,
+                    );
+                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
+                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
+                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
+                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
+                    $({
+                        let __a = &$arg;
+                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
+                        __tp += 1;
+                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
+                        __dp += __w;
+                    })*
+                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
                 }
             }
         }
@@ -168,26 +378,61 @@ macro_rules! log_warning {
 
 #[macro_export]
 macro_rules! log_error {
-    ($logger:expr, $($arg:tt)*) => {
+    ($logger:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {
         {
             const _META: &$crate::metadata::Metadata = &$crate::metadata::Metadata::new(
                 $crate::level::LogLevel::Error,
-                stringify!($($arg)*),
+                $fmt,
                 file!(),
                 line!(),
                 module_path!(),
             );
             #[allow(unused_unsafe)]
             if unsafe { ($crate::logger::Logger::log_level(&*std::sync::Arc::as_ptr(&($logger)))) }.as_usize() <= $crate::level::LogLevel::Error.as_usize() {
-                let _formatted = format!($($arg)*);
-                let _msg = $crate::message::LogMessage::new(
-                    0u64,
-                    _META,
-                    std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
-                    _formatted.into_bytes(),
-                );
-                if let Ok(_encoded) = _msg.encode() {
-                    $crate::thread_context::ThreadContext::push(&_encoded).ok();
+                let _arg_count: usize = 0 $(+ { let _ = &$arg; 1 })*;
+                let _tags_size = 1 + _arg_count;
+                let _payloads_size: usize = 0 $(+ $crate::arg::LogArg::log_max_size(&$arg))*;
+                let _total_args = _tags_size + _payloads_size;
+                let _total_msg = $crate::message::ARCHIVED_HEADER_SIZE + _total_args;
+
+                if _total_msg <= 512 {
+                    let mut __buf = [0u8; 512];
+                    let msg = $crate::message::LogMessage::new(
+                        0u64, _META,
+                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
+                        _total_args as u16,
+                    );
+                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
+                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
+                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
+                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
+                    $({
+                        let __a = &$arg;
+                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
+                        __tp += 1;
+                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
+                        __dp += __w;
+                    })*
+                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
+                } else {
+                    let mut __buf = ::std::vec![0u8; _total_msg];
+                    let msg = $crate::message::LogMessage::new(
+                        0u64, _META,
+                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
+                        _total_args as u16,
+                    );
+                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
+                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
+                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
+                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
+                    $({
+                        let __a = &$arg;
+                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
+                        __tp += 1;
+                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
+                        __dp += __w;
+                    })*
+                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
                 }
             }
         }
@@ -196,26 +441,61 @@ macro_rules! log_error {
 
 #[macro_export]
 macro_rules! log_critical {
-    ($logger:expr, $($arg:tt)*) => {
+    ($logger:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {
         {
             const _META: &$crate::metadata::Metadata = &$crate::metadata::Metadata::new(
                 $crate::level::LogLevel::Critical,
-                stringify!($($arg)*),
+                $fmt,
                 file!(),
                 line!(),
                 module_path!(),
             );
             #[allow(unused_unsafe)]
             if unsafe { ($crate::logger::Logger::log_level(&*std::sync::Arc::as_ptr(&($logger)))) }.as_usize() <= $crate::level::LogLevel::Critical.as_usize() {
-                let _formatted = format!($($arg)*);
-                let _msg = $crate::message::LogMessage::new(
-                    0u64,
-                    _META,
-                    std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
-                    _formatted.into_bytes(),
-                );
-                if let Ok(_encoded) = _msg.encode() {
-                    $crate::thread_context::ThreadContext::push(&_encoded).ok();
+                let _arg_count: usize = 0 $(+ { let _ = &$arg; 1 })*;
+                let _tags_size = 1 + _arg_count;
+                let _payloads_size: usize = 0 $(+ $crate::arg::LogArg::log_max_size(&$arg))*;
+                let _total_args = _tags_size + _payloads_size;
+                let _total_msg = $crate::message::ARCHIVED_HEADER_SIZE + _total_args;
+
+                if _total_msg <= 512 {
+                    let mut __buf = [0u8; 512];
+                    let msg = $crate::message::LogMessage::new(
+                        0u64, _META,
+                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
+                        _total_args as u16,
+                    );
+                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
+                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
+                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
+                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
+                    $({
+                        let __a = &$arg;
+                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
+                        __tp += 1;
+                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
+                        __dp += __w;
+                    })*
+                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
+                } else {
+                    let mut __buf = ::std::vec![0u8; _total_msg];
+                    let msg = $crate::message::LogMessage::new(
+                        0u64, _META,
+                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
+                        _total_args as u16,
+                    );
+                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
+                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
+                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
+                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
+                    $({
+                        let __a = &$arg;
+                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
+                        __tp += 1;
+                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
+                        __dp += __w;
+                    })*
+                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
                 }
             }
         }
@@ -232,6 +512,15 @@ mod tests {
     fn log_info_macro_compiles() {
         let logger = Logger::new("macro_test".to_string(), vec![Arc::new(ConsoleSink::new())]);
         log_info!(logger, "hello {}", "world");
+    }
+
+    #[test]
+    fn log_info_no_args() {
+        let logger = Logger::new(
+            "macro_no_args".to_string(),
+            vec![Arc::new(ConsoleSink::new())],
+        );
+        log_info!(logger, "hello world");
     }
 
     #[test]
@@ -253,9 +542,15 @@ mod tests {
     fn log_level_filtering() {
         let logger = Logger::new("filter".to_string(), vec![Arc::new(ConsoleSink::new())]);
         logger.set_log_level(crate::level::LogLevel::Warning);
-        // These should compile and not panic (just skip due to level check)
         log_debug!(logger, "this should be filtered out");
         log_info!(logger, "this too");
         log_warning!(logger, "this should pass: {}", 42);
+    }
+
+    #[test]
+    fn log_with_multiple_args() {
+        let logger = Logger::new("multi_args".to_string(), vec![Arc::new(ConsoleSink::new())]);
+        logger.set_log_level(crate::level::LogLevel::TraceL3);
+        log_info!(logger, "a: {}, b: {}, c: {}", 1, 2.5, "three");
     }
 }

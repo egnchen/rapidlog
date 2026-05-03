@@ -13,3 +13,13 @@ anstream = "0.6"
 is-terminal = "0.4"
 time = "0.3"
 thiserror = "2"
+
+[lib]
+bench = false
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "logging"
+harness = false

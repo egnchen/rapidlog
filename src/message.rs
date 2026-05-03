@@ -1,37 +1,29 @@
-use rkyv::{Archive, CheckBytes, Serialize};
-
 use crate::level::LogLevel;
 use crate::logger::Logger;
 use crate::metadata::Metadata;
 
-#[derive(Archive, Serialize, CheckBytes, Debug, PartialEq, Eq)]
-#[archive_attr(derive(CheckBytes))]
+#[derive(rkyv::Archive, rkyv::Serialize, Debug, PartialEq, Eq)]
 pub struct LogMessage {
     pub timestamp_ns: u64,
     pub metadata_ptr: u64,
     pub logger_ptr: u64,
-    pub args_data: Vec<u8>,
+    pub args_len: u16,
 }
 
-#[derive(Debug, Clone)]
-pub enum EncodeError {
-    SerializationFailed,
-}
-
-const STACK_BUFFER_SIZE: usize = 256;
+pub const ARCHIVED_HEADER_SIZE: usize = 32;
 
 impl LogMessage {
     pub fn new(
         timestamp_ns: u64,
         metadata: &'static Metadata,
         logger: *const Logger,
-        args_data: Vec<u8>,
+        args_len: u16,
     ) -> Self {
         Self {
             timestamp_ns,
             metadata_ptr: metadata as *const Metadata as u64,
             logger_ptr: logger as u64,
-            args_data,
+            args_len,
         }
     }
 
@@ -40,14 +32,19 @@ impl LogMessage {
         meta.level
     }
 
-    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
-        rkyv::to_bytes::<_, STACK_BUFFER_SIZE>(self)
-            .map(|v| v.to_vec())
-            .map_err(|_| EncodeError::SerializationFailed)
+    pub fn serialize_header_into(&self, buf: &mut [u8]) {
+        buf[0..8].copy_from_slice(&self.timestamp_ns.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.metadata_ptr.to_le_bytes());
+        buf[16..24].copy_from_slice(&self.logger_ptr.to_le_bytes());
+        buf[24..26].copy_from_slice(&self.args_len.to_le_bytes());
     }
 
-    pub fn decode(bytes: &[u8]) -> Option<&ArchivedLogMessage> {
-        rkyv::check_archived_root::<LogMessage>(bytes).ok()
+    pub fn decode(raw: &[u8]) -> Option<&ArchivedLogMessage> {
+        if raw.len() < ARCHIVED_HEADER_SIZE {
+            return None;
+        }
+        let ptr = raw.as_ptr() as *const ArchivedLogMessage;
+        Some(unsafe { &*ptr })
     }
 }
 
@@ -67,56 +64,32 @@ mod tests {
     }
 
     #[test]
-    fn encode_decode_roundtrip() {
+    fn serialize_header_into_works() {
         let meta = test_metadata();
-        let msg = LogMessage::new(123456789, meta, std::ptr::null(), vec![1, 2, 3, 4]);
+        let msg = LogMessage::new(123456789, meta, std::ptr::null(), 42);
+        let mut buf = vec![0u8; ARCHIVED_HEADER_SIZE];
+        msg.serialize_header_into(&mut buf);
 
-        let bytes = msg.encode().unwrap();
-        let archived = LogMessage::decode(&bytes).unwrap();
-
+        let archived = LogMessage::decode(&buf).unwrap();
         assert_eq!(archived.timestamp_ns, 123456789);
-        assert_eq!(archived.args_data, vec![1u8, 2, 3, 4]);
-    }
-
-    #[test]
-    fn encode_empty_message() {
-        let meta = test_metadata();
-        let msg = LogMessage::new(0, meta, std::ptr::null(), vec![]);
-
-        let bytes = msg.encode().unwrap();
-        let archived = LogMessage::decode(&bytes).unwrap();
-
-        assert_eq!(archived.timestamp_ns, 0);
-        assert!(archived.args_data.is_empty());
+        assert_eq!(archived.args_len, 42);
     }
 
     #[test]
     fn level_from_metadata_works() {
         let meta = test_metadata();
-        let msg = LogMessage::new(0, meta, std::ptr::null(), vec![]);
+        let msg = LogMessage::new(0, meta, std::ptr::null(), 0);
         assert_eq!(msg.level_from_metadata(), LogLevel::Info);
-    }
-
-    #[test]
-    fn args_data_roundtrip() {
-        let meta = test_metadata();
-        let data = vec![255u8; 1000];
-        let msg = LogMessage::new(42, meta, std::ptr::null(), data.clone());
-
-        let bytes = msg.encode().unwrap();
-        let archived = LogMessage::decode(&bytes).unwrap();
-
-        assert_eq!(archived.args_data, data);
     }
 
     #[test]
     fn metadata_pointer_roundtrip() {
         let meta = test_metadata();
-        let msg = LogMessage::new(0, meta, std::ptr::null(), vec![]);
+        let msg = LogMessage::new(100, meta, std::ptr::null(), 0);
+        let mut buf = vec![0u8; ARCHIVED_HEADER_SIZE];
+        msg.serialize_header_into(&mut buf);
 
-        let bytes = msg.encode().unwrap();
-        let archived = LogMessage::decode(&bytes).unwrap();
-
+        let archived = LogMessage::decode(&buf).unwrap();
         let meta_from_archived: &Metadata =
             unsafe { &*(archived.metadata_ptr as usize as *const Metadata) };
         assert_eq!(meta_from_archived.level, LogLevel::Info);
@@ -127,5 +100,16 @@ mod tests {
     fn decode_invalid_bytes_returns_none() {
         let invalid = vec![0u8; 10];
         assert!(LogMessage::decode(&invalid).is_none());
+    }
+
+    #[test]
+    fn args_len_preserved() {
+        let meta = test_metadata();
+        let msg = LogMessage::new(0, meta, std::ptr::null(), 1234);
+        let mut buf = vec![0u8; ARCHIVED_HEADER_SIZE];
+        msg.serialize_header_into(&mut buf);
+
+        let archived = LogMessage::decode(&buf).unwrap();
+        assert_eq!(archived.args_len, 1234);
     }
 }

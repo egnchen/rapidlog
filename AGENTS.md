@@ -86,6 +86,30 @@ Goal: async console logging working end-to-end.
 
 ---
 
+## TODO List — Phase 2 (Zero-Allocation Hot Path)
+
+Goal: eliminate all heap allocations from the hot path. Defer formatting to backend. Single-digit nanosecond latency target.
+
+| # | Done | Task | Depends On |
+|---|------|------|------------|
+| 2.0 | [x] | **`LogArg` trait + encoding (`src/arg.rs`)** — Trait with `log_tag()`, `log_encode()`, `log_max_size()`. Impls for `i32, i64, u32, u64, usize, f32, f64, bool, &str, String`. Packed layout: count byte + all tags + all payloads (no interleaving). `DecodedArg` enum with `as_display_string()`. Single generic `decode_args()` function using tag-based dispatch. `format_with_args()` for backend formatting. `DisplayArg<T>` / `DebugArg<T>` wrappers for fallback types. | 1.2 |
+| 2.1 | [x] | **Ring buffer 8-byte header (`src/queue.rs`)** — Changed from 4-byte to 8-byte length-prefix header (4 bytes length LE + 4 bytes flags) for 8-byte alignment. `push()` writes zero-initialized chunk, then header + data. `pop()` reads 8-byte header and extracts payload. | 1.3 |
+| 2.2 | [x] | **ThreadContext unchanged** — Existing `push()` method is sufficient. Stack buffer encoding feeds into it. | 1.7 |
+| 2.3 | [x] | **Refactor `LogMessage` (`src/message.rs`)** — Replaced `args_data: Vec<u8>` with `args_len: u16` (inline arg data follows archive header). `serialize_header_into(&self, buf)` writes raw bytes matching rkyv archive layout (32 bytes: 3×u64 + u16 + padding). `decode()` uses raw pointer cast to `&ArchivedLogMessage` (no validation). | 1.6 |
+| 2.4 | [x] | **Rewrite macros (`src/macros.rs`)** — New pattern: `($logger, $fmt:literal $(, $arg:expr)*)`. Hot path: compute total size from `log_max_size()` calls, use 512-byte stack buffer (zero alloc) or `vec!` fallback for large messages. Encode: header (via `serialize_header_into`) + args (count + packed tags + payloads). Level check unchanged. All 8 log levels updated. | 2.0, 2.1, 2.3 |
+| 2.5 | [x] | **Update backend (`src/backend.rs`)** — `format_message()` now reads `archived.args_len`, extracts inline arg bytes after archive header, calls `decode_args()` → `format_with_args()`. Timestamp prefix + level + file:line output unchanged. | 2.0, 2.3 |
+| 2.6 | [x] | **Integration tests + benchmarks** — Updated tests for new macro signature (`"fmt {}", arg` not `"fmt {arg}"`). Criterion benchmarks: 1 integer (10.4 ns), 2 floats (11.5 ns), 3 strings (15.3 ns), 1 Vec<String> via DebugArg (204 ns). Speedup: 11-22× for primitives, 1.5× for complex types. | 2.0–2.5 |
+
+**Remaining optimization notes:**
+
+- The `drain_queue()` call inside `b.iter_custom` is included in benchmark timing, inflating results slightly (~2-3 ns per message batch)
+- `Vec<String>` benchmark uses `DebugArg` wrapper which calls `format!("{:?}")` internally — one heap allocation remains
+- Stack buffer threshold (512 bytes) works for most log calls. Larger messages fall back to `Vec<u8>` (one allocation)
+- Timestamp is currently hardcoded to 0 — adding a monotonic clock (e.g. TSC) would add ~5-15 ns
+- Direct ring buffer write (no stack intermediary copy) could save another ~2-5 ns per call
+
+---
+
 ## Commands
 
 ```bash
