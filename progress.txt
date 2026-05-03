@@ -1,0 +1,20 @@
+## Codebase Patterns
+
+- Rust edition 2024 uses `extern crate` not needed; crate dependencies are auto-available.
+- Module files go in `src/` with `pub mod` declarations in `lib.rs`.
+- Sink trait uses `Send + Sync` bounds for thread-safe dispatch from backend.
+- Logger and sinks use `Arc<dyn Sink>` for shared ownership.
+
+---
+## [2026-05-04] — 1.1 Project Scaffold
+- Added dependencies to Cargo.toml: `rtrb`, `rkyv` (with `std` feature), `rkyv_derive`, `parking_lot`, `anstream`, `is-terminal`, `time`, `thiserror`
+- Created `src/lib.rs` with `pub mod` declarations for all planned modules
+- Created stub files: `level.rs`, `metadata.rs`, `queue.rs`, `sink.rs`, `sinks/mod.rs`, `sinks/console.rs`, `logger.rs`, `message.rs`, `thread_context.rs`, `backend.rs`, `frontend.rs`, `macros.rs`
+- Removed `src/main.rs` (this is a lib crate)
+- All quality checks pass: cargo check, cargo test, cargo clippy, cargo fmt
+- **Learnings for future iterations:**
+  - `rkyv` 0.7 does NOT have a `derive` feature — derive macros come from separate `rkyv_derive` crate
+  - `VecDeque` does not have `extend_from_slice` — use `extend(iter)` instead
+  - Clippy `new_without_default` requires `Default` impls for types with `new()`
+  - Rust edition 2024 reorders imports differently than 2021 (alphabetical by default)
+---
