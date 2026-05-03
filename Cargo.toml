@@ -5,8 +5,9 @@ edition = "2024"
 
 [dependencies]
 rtrb = "0.3"
-rkyv = { version = "0.7", features = ["std"] }
+rkyv = { version = "0.7", features = ["std", "bytecheck", "validation"] }
 rkyv_derive = "0.7"
+bytecheck = "0.6"
 parking_lot = "0.12"
 anstream = "0.6"
 is-terminal = "0.4"

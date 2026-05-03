@@ -338,6 +338,7 @@ name = "rapidlog"
 version = "0.1.0"
 dependencies = [
  "anstream",
+ "bytecheck",
  "is-terminal",
  "parking_lot",
  "rkyv",
