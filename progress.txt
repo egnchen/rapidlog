@@ -52,3 +52,19 @@
   - Packed tags-before-payloads layout proven efficient and simple to decode
   - 10 ns target almost met — remaining overhead is ring buffer copy (~2ns), level check (~1ns), encoding (~5ns)
 ---
+
+## [2026-05-04] — Code Review Fixes (issues #1, #2, #5)
+- Fixed HIGH-severity UB: unaligned pointer dereference in `LogMessage::decode()` replaced with `std::ptr::read_unaligned` on individual fields
+- Added `#[repr(C)]` to `LogMessage` to guarantee field layout in `ArchivedLogMessage` (rkyv carries repr through)
+- Added compile-time assertion: `const _: () = assert!(ARCHIVED_HEADER_SIZE == 32)`
+- `ARCHIVED_HEADER_SIZE` now computed from `size_of::<ArchivedLogMessage>()` instead of hardcoded magic number
+- `decode()` now returns owned `ArchivedLogMessage` instead of `&ArchivedLogMessage` — eliminates unsound lifetime coupling to raw buffer
+- Refactored `format_message()` to accept `args_bytes: &[u8]` parameter instead of unsafe pointer math past struct boundary
+- Backend caller now extracts args slice explicitly: `raw[ARCHIVED_HEADER_SIZE..][..header.args_len as usize]`
+- Refactored 8 log macros (550 lines) to delegate to single `log_impl!` helper macro (172 lines) — 420-line reduction
+- Files changed: `src/message.rs`, `src/backend.rs`, `src/macros.rs`
+- **Learnings for future iterations:**
+  - `Vec::with_capacity(n)` does NOT guarantee alignment beyond 1 byte — raw casts to larger aligned types are UB
+  - `#[repr(C)]` on the source struct carries through to rkyv's `ArchivedLogMessage` generate type
+  - Un-exported helper macros can't be called via `$crate::name` from exported macros — must use `#[macro_export] #[doc(hidden)]`
+---

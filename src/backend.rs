@@ -83,15 +83,19 @@ impl Backend {
                 raw_messages.extend(more);
             }
 
-            let mut decoded: Vec<&ArchivedLogMessage> = raw_messages
+            let mut decoded: Vec<(ArchivedLogMessage, Vec<u8>)> = raw_messages
                 .iter()
-                .filter_map(|raw| LogMessage::decode(raw))
+                .filter_map(|raw| {
+                    let header = LogMessage::decode(raw)?;
+                    let args = raw[ARCHIVED_HEADER_SIZE..][..header.args_len as usize].to_vec();
+                    Some((header, args))
+                })
                 .collect();
 
-            decoded.sort_unstable_by_key(|m| m.timestamp_ns);
+            decoded.sort_unstable_by_key(|(m, _)| m.timestamp_ns);
 
-            for archived in &decoded {
-                let formatted = Self::format_message(archived);
+            for (archived, args_bytes) in &decoded {
+                let formatted = Self::format_message(archived, args_bytes);
                 let metadata: &Metadata =
                     unsafe { &*(archived.metadata_ptr as usize as *const Metadata) };
                 let logger: &Logger = unsafe { &*(archived.logger_ptr as usize as *const Logger) };
@@ -105,19 +109,14 @@ impl Backend {
         }
     }
 
-    fn format_message(archived: &ArchivedLogMessage) -> String {
+    fn format_message(archived: &ArchivedLogMessage, args_bytes: &[u8]) -> String {
         let timestamp_ns = archived.timestamp_ns;
         let metadata: &Metadata = unsafe { &*(archived.metadata_ptr as usize as *const Metadata) };
-        let args_len = archived.args_len as usize;
 
         let secs = timestamp_ns / 1_000_000_000;
         let nanos = (timestamp_ns % 1_000_000_000) as u32;
 
-        let body = if args_len > 0 {
-            let archived_ptr = archived as *const ArchivedLogMessage as *const u8;
-            let args_bytes = unsafe {
-                std::slice::from_raw_parts(archived_ptr.add(ARCHIVED_HEADER_SIZE), args_len)
-            };
+        let body = if !args_bytes.is_empty() {
             let decoded = arg::decode_args(args_bytes);
             arg::format_with_args(metadata.format_str, &decoded)
         } else {
@@ -244,7 +243,8 @@ mod tests {
         (456i32).log_encode(&mut buf[ARCHIVED_HEADER_SIZE + 3 + 8..]);
 
         let archived = LogMessage::decode(&buf).unwrap();
-        let formatted = Backend::format_message(archived);
+        let args_bytes = &buf[ARCHIVED_HEADER_SIZE..][..archived.args_len as usize];
+        let formatted = Backend::format_message(&archived, args_bytes);
 
         assert!(formatted.contains("fmt: 123 456"), "got: {formatted}");
         assert!(formatted.contains("[Warning]"), "got: {formatted}");

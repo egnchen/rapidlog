@@ -3,6 +3,7 @@ use crate::logger::Logger;
 use crate::metadata::Metadata;
 
 #[derive(rkyv::Archive, rkyv::Serialize, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct LogMessage {
     pub timestamp_ns: u64,
     pub metadata_ptr: u64,
@@ -10,7 +11,9 @@ pub struct LogMessage {
     pub args_len: u16,
 }
 
-pub const ARCHIVED_HEADER_SIZE: usize = 32;
+pub const ARCHIVED_HEADER_SIZE: usize = std::mem::size_of::<ArchivedLogMessage>();
+
+const _: () = assert!(ARCHIVED_HEADER_SIZE == 32);
 
 impl LogMessage {
     pub fn new(
@@ -39,12 +42,19 @@ impl LogMessage {
         buf[24..26].copy_from_slice(&self.args_len.to_le_bytes());
     }
 
-    pub fn decode(raw: &[u8]) -> Option<&ArchivedLogMessage> {
+    pub fn decode(raw: &[u8]) -> Option<ArchivedLogMessage> {
         if raw.len() < ARCHIVED_HEADER_SIZE {
             return None;
         }
-        let ptr = raw.as_ptr() as *const ArchivedLogMessage;
-        Some(unsafe { &*ptr })
+        unsafe {
+            let ptr = raw.as_ptr();
+            Some(ArchivedLogMessage {
+                timestamp_ns: std::ptr::read_unaligned(ptr as *const u64),
+                metadata_ptr: std::ptr::read_unaligned(ptr.add(8) as *const u64),
+                logger_ptr: std::ptr::read_unaligned(ptr.add(16) as *const u64),
+                args_len: std::ptr::read_unaligned(ptr.add(24) as *const u16),
+            })
+        }
     }
 }
 
