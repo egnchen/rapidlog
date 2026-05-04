@@ -178,3 +178,80 @@
 - `SystemTime::now()` on Linux uses vDSO and is surprisingly close to RDTSC speed (~20ns vs ~15ns)
 - `u64::to_ne()` does not exist in std — use `to_ne_bytes()` or cast to smaller type
 - Compile-time feature dispatch (`#[cfg]` on fn definitions) is strictly better than runtime atomics for timestamp/level selection
+
+## [2026-05-04] — Phase 2: Unbounded Queue & More Sinks (PLAN.md Phase 2)
+
+### 2.5 NullSink
+- Created `src/sinks/null.rs` with `NullSink` struct implementing `Sink`
+- Replaced inline `NullSink` in `benches/logging.rs` with exported `rapidlog::NullSink`
+- Exported via `sinks/mod.rs` and `lib.rs`
+
+### 2.2 FileSink
+- Created `src/sinks/file.rs` with `FileMode` (Append/Truncate) and `FileSink`
+- `FileSink` wraps `parking_lot::Mutex<BufWriter<File>>` with path tracking
+- Tests: write/read back, multiple messages, append preserves, truncate overwrites, flush safety, Send+Sync
+- Exported via `sinks/mod.rs` and `lib.rs`
+
+### 2.6 PatternFormatter
+- Created `src/formatter.rs` with specifier-based pattern formatting
+- Supports: `%Y %m %d %H %M %S %s %f %l %F %L %v`, unknowns rendered literally
+- Default pattern `"[%s.%f] [%l] %F:%L %v"` matches current hardcoded format
+- Added `pattern_formatter: Option<PatternFormatter>` to `BackendOptions`
+- `Backend::format_message()` uses formatter when provided, falls back to hardcoded
+- Uses `time` crate (already a dependency) for calendar date formatting
+- Tests: each specifier, literal text, unknown specifier, empty args, custom pattern via backend
+- `BackendOptions` struct updates affected 3 tests in backend.rs + 5 in integration.rs
+  (all updated to use `..Default::default()`)
+
+### 2.3 RotatingFileSink
+- Created `src/sinks/rotating.rs` owning its own `BufWriter<File>` directly
+- `RotationPolicy::SizeBased { max_bytes }` and `TimeBased { interval: Hourly/Daily }`
+- Rotation triggers BEFORE writing if the pending write would exceed the limit
+- On rotation: flush → take BufWriter → `into_inner()` to close file → rename → open new
+- Rotation filenames: `path.1`, `path.2`, ... using incremental index
+- Tests: create with both policies, size rotation triggers, time rotation with forced past timestamp, messages preserved across rotation, index increments, flush delegates, Send+Sync
+
+### 2.1 Queue Mode Configuration
+- Created `src/config.rs` with `QueueMode::UnboundedBlocking` and `QueueMode::BoundedDropping`
+- Added `SpscProducer::capacity()` and `SpscProducer::grow()` to `src/queue.rs`
+  - `capacity` stored in SpscProducer (rtrb::Producer doesn't expose capacity)
+  - `grow()` doubles capacity up to 2 GiB, updates internal producer in-place, returns new consumer for registration
+- Added `ThreadContext::with_mode(mode, start_capacity)` and `ThreadContext::init_with_mode()`
+- Enhanced `push()` and `push_encoded()` with transparent grow+retry on Full for UnboundedBlocking
+  - Hot path: zero overhead (mode check only on Err(Full) branch)
+  - Changed `push_encoded` from `FnOnce` to `FnMut` to allow retry after growth
+  - Macro updated to pass `|__buf: &mut [u8]|` (explicit type annotation for FnMut inference)
+- Added `Frontend::set_queue_mode(QueueMode)`
+- Changed `TEST_SERIAL` from `std::sync::Mutex` to `parking_lot::Mutex` (no poison on panic)
+- Fixed `poll_all_registered_queues`: `swap_remove` → `remove` to preserve consumer FIFO order
+  (swap_remove was moving the active consumer before abandoned ones, reordering messages)
+- Added `reset_ctx()` test helper to clear TLS between tests
+- Queue mode tests: grow doubles capacity, grow respects max, unbounded push past capacity,
+  multi-block FIFO pop, bounded drops on full, mode persistence, grow pushes consumer to registry,
+  abandoned cleanup with chained blocks
+- Integration tests: unbounded no data loss (4 threads × 200 messages), bounded no panic (2 threads × 500)
+
+### Test summary
+- **Before:** 61 unit + 5 integration = 66 tests
+- **After:** 93 unit + 7 integration = 100 tests
+- New: NullSink (2), FileSink (6), PatternFormatter (9), RotatingFileSink (8), Queue modes (10), Integration (2)
+
+### Files changed/created
+- **New:** `src/config.rs`, `src/formatter.rs`, `src/sinks/null.rs`, `src/sinks/file.rs`, `src/sinks/rotating.rs`
+- **Modified:** `src/queue.rs`, `src/thread_context.rs`, `src/frontend.rs`, `src/backend.rs`, `src/lib.rs`, `src/sinks/mod.rs`, `src/macros.rs`, `benches/logging.rs`, `tests/integration.rs`
+
+### Learnings
+- `rtrb::Producer` doesn't expose `capacity()` — must store capacity separately in wrapper
+- `rtrb::RingBuffer` capacity is opaque after splitting into Producer+Consumer
+- `poll_all_registered_queues` with `swap_remove` silently breaks FIFO ordering across blocks
+  — use `remove(i)` instead (O(n) removal but consumer count is always small)
+- TLS persists across unit tests in same thread — `reset_ctx()` helper needed for test isolation
+- `parking_lot::Mutex` preferred over `std::sync::Mutex` for test locks (no poison)
+- `BufWriter::into_inner()` errors with `&io::Error` — can't `?` convert; use `.ok()` after explicit flush
+- `SystemTime::now() + Duration::from_secs(u64::MAX)` overflows — use realistic future dates
+- `time::OffsetDateTime::from_unix_timestamp()` works for pattern formatter calendar fields
+
+### Deferred
+- JSON sinks (type system still in design)
+- Compression in RotatingFileSink (MVP)
+- `UnboundedDropping` and `BoundedBlocking` queue modes (complex, low payoff for MVP)

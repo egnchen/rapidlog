@@ -4,6 +4,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::arg;
+use crate::formatter::{FormattedRecord, PatternFormatter};
 use crate::logger::Logger;
 use crate::message::{ARCHIVED_HEADER_SIZE, ArchivedLogMessage, LogMessage};
 use crate::metadata::Metadata;
@@ -14,6 +15,7 @@ const DEFAULT_MIN_BATCH_SIZE: usize = 256;
 pub struct BackendOptions {
     pub sleep_duration: Duration,
     pub min_batch_size: usize,
+    pub pattern_formatter: Option<PatternFormatter>,
 }
 
 impl Default for BackendOptions {
@@ -21,6 +23,7 @@ impl Default for BackendOptions {
         Self {
             sleep_duration: Duration::from_millis(1),
             min_batch_size: DEFAULT_MIN_BATCH_SIZE,
+            pattern_formatter: None,
         }
     }
 }
@@ -67,6 +70,7 @@ impl Backend {
     }
 
     fn worker_loop(options: BackendOptions, stop: Arc<AtomicBool>) {
+        let formatter = options.pattern_formatter;
         while !stop.load(Ordering::Relaxed) {
             let mut raw_messages = ThreadContext::poll_all_registered_queues();
 
@@ -119,7 +123,7 @@ impl Backend {
                     continue;
                 }
 
-                let formatted = Self::format_message(archived, &decoded_args);
+                let formatted = Self::format_message(archived, &decoded_args, formatter.as_ref());
                 for sink in &logger.sinks {
                     sink.write(&formatted);
                 }
@@ -127,7 +131,11 @@ impl Backend {
         }
     }
 
-    fn format_message(archived: &ArchivedLogMessage, args: &[arg::DecodedArg]) -> String {
+    fn format_message(
+        archived: &ArchivedLogMessage,
+        args: &[arg::DecodedArg],
+        formatter: Option<&PatternFormatter>,
+    ) -> String {
         let display_ns = crate::timestamp::to_display_nanos(archived.timestamp_ns);
         // SAFETY: metadata_ptr points to a &'static Metadata from the log call site
         // that outlives the backend worker.
@@ -142,10 +150,22 @@ impl Backend {
             metadata.format_str.to_string()
         };
 
-        format!(
-            "[{}.{:09}] [{:?}] {}:{} {body}",
-            secs, nanos, metadata.level, metadata.file, metadata.line,
-        )
+        if let Some(fmtr) = formatter {
+            let record = FormattedRecord {
+                timestamp_secs: secs,
+                timestamp_nanos: nanos,
+                level: &metadata.level,
+                file: metadata.file,
+                line: metadata.line,
+                body: &body,
+            };
+            fmtr.format(&record)
+        } else {
+            format!(
+                "[{}.{:09}] [{:?}] {}:{} {body}",
+                secs, nanos, metadata.level, metadata.file, metadata.line,
+            )
+        }
     }
 }
 
@@ -182,7 +202,7 @@ mod tests {
 
     #[test]
     fn backend_start_and_stop() {
-        let _guard = TEST_SERIAL.lock().unwrap();
+        let _guard = TEST_SERIAL.lock();
         let backend = Backend::start(BackendOptions::default());
         backend.stop();
         let mut backend = backend;
@@ -191,7 +211,7 @@ mod tests {
 
     #[test]
     fn backend_processes_messages() {
-        let _guard = TEST_SERIAL.lock().unwrap();
+        let _guard = TEST_SERIAL.lock();
         let sink = CountingSink::new();
         let logger = Logger::new("test_backend".to_string(), vec![sink.clone()]);
         logger.set_log_level(LogLevel::TraceL3);
@@ -230,6 +250,7 @@ mod tests {
         let backend = Backend::start(BackendOptions {
             sleep_duration: Duration::from_millis(1),
             min_batch_size: 1,
+            ..Default::default()
         });
 
         thread::sleep(Duration::from_millis(50));
@@ -268,7 +289,7 @@ mod tests {
         let archived = LogMessage::decode(&buf).unwrap();
         let args_bytes = &buf[ARCHIVED_HEADER_SIZE..][..archived.args_len as usize];
         let decoded = arg::decode_args(args_bytes);
-        let formatted = Backend::format_message(&archived, &decoded);
+        let formatted = Backend::format_message(&archived, &decoded, None);
 
         assert!(formatted.contains("fmt: 123 456"), "got: {formatted}");
         assert!(formatted.contains("[Warning]"), "got: {formatted}");
@@ -276,8 +297,49 @@ mod tests {
     }
 
     #[test]
+    fn format_message_with_custom_pattern() {
+        let meta = Box::leak(Box::new(Metadata::new(
+            LogLevel::Error,
+            "error {}",
+            "src/lib.rs",
+            100,
+            "rapidlog",
+        )));
+
+        let logger = Logger::new("pat_logger".to_string(), vec![]);
+        let total_size = ARCHIVED_HEADER_SIZE + 1 + 1 + 8;
+        let mut buf = vec![0u8; total_size];
+
+        let args_len = 1 + 1 + 8; // count + tag + int
+        let msg = LogMessage::new(
+            1_700_000_010_000_000_000,
+            meta,
+            Arc::as_ptr(&logger),
+            args_len as u16,
+        );
+        msg.serialize_header_into(&mut buf[..ARCHIVED_HEADER_SIZE]);
+
+        buf[ARCHIVED_HEADER_SIZE] = 1;
+        buf[ARCHIVED_HEADER_SIZE + 1] = arg::TAG_INT;
+        (99i32).log_encode(&mut buf[ARCHIVED_HEADER_SIZE + 2..]);
+
+        let archived = LogMessage::decode(&buf).unwrap();
+        let args_bytes = &buf[ARCHIVED_HEADER_SIZE..][..archived.args_len as usize];
+        let decoded = arg::decode_args(args_bytes);
+
+        let fmt = PatternFormatter::new("[%l] %F:%L — %v");
+        let formatted = Backend::format_message(&archived, &decoded, Some(&fmt));
+
+        assert!(
+            formatted.starts_with("[Error] src/lib.rs:100"),
+            "got: {formatted}"
+        );
+        assert!(formatted.contains("error 99"), "got: {formatted}");
+    }
+
+    #[test]
     fn messages_sorted_by_timestamp() {
-        let _guard = TEST_SERIAL.lock().unwrap();
+        let _guard = TEST_SERIAL.lock();
         let sink = CountingSink::new();
         let logger = Logger::new("test_sort".to_string(), vec![sink.clone()]);
         logger.set_log_level(LogLevel::TraceL3);
@@ -302,6 +364,7 @@ mod tests {
         let backend = Backend::start(BackendOptions {
             sleep_duration: Duration::from_millis(1),
             min_batch_size: 1,
+            ..Default::default()
         });
 
         thread::sleep(Duration::from_millis(50));
@@ -314,7 +377,7 @@ mod tests {
 
     #[test]
     fn filter_blocks_messages() {
-        let _guard = TEST_SERIAL.lock().unwrap();
+        let _guard = TEST_SERIAL.lock();
         let sink = CountingSink::new();
         let logger = Logger::new("test_filter".to_string(), vec![sink.clone()]);
         logger.set_log_level(LogLevel::TraceL3);
@@ -340,6 +403,7 @@ mod tests {
         let backend = Backend::start(BackendOptions {
             sleep_duration: Duration::from_millis(1),
             min_batch_size: 1,
+            ..Default::default()
         });
 
         thread::sleep(Duration::from_millis(50));

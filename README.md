@@ -150,9 +150,99 @@ rapidlog::log_info!(logger, "data: {:?}", DebugArg(&vec));
 | Sink | Description |
 |------|-------------|
 | `ConsoleSink` | ANSI-colored stdout via `anstream` |
+| `NullSink` | No-op sink for benchmarks and tests |
+| `FileSink` | Buffered file output with append/truncate modes |
+| `RotatingFileSink` | File rotation by size (N bytes) or time (hourly/daily) |
 
-Additional sinks planned: `FileSink`, `RotatingFileSink`, `JsonFileSink`,
-`JsonConsoleSink`, `NullSink`.
+Additional sinks planned: `JsonFileSink`, `JsonConsoleSink`.
+
+### FileSink
+
+```rust
+use rapidlog::{FileMode, FileSink};
+
+let sink = FileSink::new("app.log", FileMode::Append).unwrap();
+let logger = Frontend::create_or_get_logger("file", vec![Arc::new(sink)]);
+// Messages are written to app.log, one per line.
+```
+
+- `FileMode::Append` — create if missing, append to existing
+- `FileMode::Truncate` — create or overwrite
+
+### RotatingFileSink
+
+```rust
+use rapidlog::{RotatingFileSink, RotationPolicy};
+
+// Rotate after 10 MB
+let policy = RotationPolicy::SizeBased { max_bytes: 10 * 1024 * 1024 };
+let sink = RotatingFileSink::new("app.log", policy).unwrap();
+
+// Rotate every hour
+use rapidlog::TimeInterval;
+let policy = RotationPolicy::TimeBased { interval: TimeInterval::Hourly };
+let sink = RotatingFileSink::new("app.log", policy).unwrap();
+```
+
+Rotated files are named `app.log.1`, `app.log.2`, etc. Compression is not yet
+supported.
+
+## Pattern Formatter
+
+Customize log message format via `BackendOptions`:
+
+```rust
+use rapidlog::{Backend, BackendOptions, PatternFormatter};
+
+let pattern = PatternFormatter::new("%Y-%m-%d %H:%M:%S.%f [%l] %F:%L — %v");
+let options = BackendOptions {
+    pattern_formatter: Some(pattern),
+    ..Default::default()
+};
+let backend = Backend::start(options);
+```
+
+When no formatter is provided, the default format is:
+`"[{timestamp_secs}.{nanos}] [{level}] {file}:{line} {message}"`
+
+| Specifier | Output |
+|-----------|--------|
+| `%Y` | Year (4 digits) |
+| `%m` | Month (01–12) |
+| `%d` | Day (01–31) |
+| `%H` | Hour (00–23) |
+| `%M` | Minute (00–59) |
+| `%S` | Second (00–59) |
+| `%s` | Whole seconds (Unix timestamp) |
+| `%f` | Fractional seconds (9-digit nanoseconds) |
+| `%l` | Log level (e.g. `Info`, `Error`) |
+| `%F` | Source file path |
+| `%L` | Source line number |
+| `%v` | Formatted message body |
+
+Unknown specifiers (e.g. `%x`) are rendered literally.
+
+## Queue Modes
+
+Control overflow behavior per thread via `Frontend::set_queue_mode()`:
+
+```rust
+use rapidlog::QueueMode;
+
+// Never drop messages — grow queue as needed (default starting at 128 KiB)
+Frontend::set_queue_mode(QueueMode::UnboundedBlocking);
+
+// Drop messages when the fixed-size queue is full (legacy behavior)
+Frontend::set_queue_mode(QueueMode::BoundedDropping);
+```
+
+| Mode | Behavior |
+|------|----------|
+| `UnboundedBlocking` | Grows by doubling capacity (up to 2 GiB) when full; never drops |
+| `BoundedDropping` | Fixed 128 KiB ring buffer; silently drops messages when full |
+
+Call `set_queue_mode` once per thread before logging. The mode applies to all
+log calls on that thread, regardless of which logger is used.
 
 ## Benchmarks
 

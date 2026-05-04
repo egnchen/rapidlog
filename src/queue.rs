@@ -1,6 +1,7 @@
+use crate::config::MAX_BLOCK_CAPACITY;
 use rtrb::{Consumer as RtrbConsumer, Producer as RtrbProducer, RingBuffer};
 
-pub const DEFAULT_QUEUE_CAPACITY: usize = 131_072;
+pub use crate::config::DEFAULT_START_CAPACITY as DEFAULT_QUEUE_CAPACITY;
 
 pub const HEADER_SIZE: usize = 8;
 
@@ -17,6 +18,7 @@ pub enum PushError {
 
 pub struct SpscProducer {
     inner: RtrbProducer<u8>,
+    capacity: usize,
 }
 
 pub struct SpscConsumer {
@@ -25,10 +27,35 @@ pub struct SpscConsumer {
 
 pub fn create_queue(capacity: usize) -> (SpscProducer, SpscConsumer) {
     let (prod, cons) = RingBuffer::new(capacity);
-    (SpscProducer { inner: prod }, SpscConsumer { inner: cons })
+    (
+        SpscProducer {
+            inner: prod,
+            capacity,
+        },
+        SpscConsumer { inner: cons },
+    )
 }
 
 impl SpscProducer {
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    // Creates a new ring buffer at doubled capacity and returns its consumer half.
+    // The old producer is dropped, marking the old consumer as abandoned. The caller
+    // must push the new consumer into CONSUMER_REGISTRY so the backend drains both
+    // the old block (abandoned, via registry cleanup) and the new block.
+    pub fn grow(&mut self) -> Option<SpscConsumer> {
+        let new_cap = (self.capacity * 2).min(MAX_BLOCK_CAPACITY);
+        if new_cap <= self.capacity {
+            return None;
+        }
+        let (prod, cons) = RingBuffer::new(new_cap);
+        self.inner = prod;
+        self.capacity = new_cap;
+        Some(SpscConsumer { inner: cons })
+    }
+
     pub fn push(&mut self, data: &[u8]) -> Result<(), PushError> {
         let msg_len = data.len();
         let total = HEADER_SIZE + msg_len;
@@ -84,7 +111,7 @@ impl SpscProducer {
     pub fn push_encoded<R>(
         &mut self,
         total_msg: usize,
-        encode: impl FnOnce(&mut [u8]) -> R,
+        encode: &mut impl FnMut(&mut [u8]) -> R,
     ) -> Result<R, PushError> {
         let total = HEADER_SIZE + total_msg;
         let padded = align_up(total, CACHE_LINE);
@@ -281,5 +308,31 @@ mod tests {
         assert!(!cons.is_abandoned());
         drop(prod);
         assert!(cons.is_abandoned());
+    }
+
+    #[test]
+    fn capacity_returns_correct_value() {
+        let (prod, _cons) = create_queue(256);
+        assert_eq!(prod.capacity(), 256);
+        let (prod, _cons) = create_queue(1024);
+        assert_eq!(prod.capacity(), 1024);
+    }
+
+    #[test]
+    fn grow_doubles_capacity() {
+        let (mut prod, _cons) = create_queue(256);
+        assert_eq!(prod.capacity(), 256);
+        let new_cons = prod.grow().unwrap();
+        assert_eq!(prod.capacity(), 512);
+        assert!(!new_cons.is_abandoned());
+    }
+
+    #[test]
+    fn grow_respects_max_and_returns_none() {
+        // Create producer at max block capacity
+        let max = MAX_BLOCK_CAPACITY;
+        let (mut prod, _cons) = create_queue(max);
+        assert!(prod.grow().is_none());
+        assert_eq!(prod.capacity(), max);
     }
 }

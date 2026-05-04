@@ -21,13 +21,15 @@ macro_rules! log_impl {
                 let _total_args = _tags_size + _payloads_size;
                 let _total_msg = $crate::message::ARCHIVED_HEADER_SIZE + _total_args;
 
-                $crate::thread_context::ThreadContext::push_encoded(_total_msg, |__buf| {
-                    let msg = $crate::message::LogMessage::new(
-                        $crate::timestamp::now(), _META,
-                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
-                        _total_args as u16,
-                    );
-                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
+                $crate::thread_context::ThreadContext::push_encoded(_total_msg, |__buf: &mut [u8]| {
+                    let __p = __buf.as_mut_ptr();
+                    unsafe {
+                        (__p.add(8) as *mut u64).write_unaligned(
+                            _META as *const $crate::metadata::Metadata as u64);
+                        (__p.add(16) as *mut u64).write_unaligned(
+                            std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger as u64);
+                        (__p.add(24) as *mut u16).write_unaligned(_total_args as u16);
+                    }
                     __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
                     let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
                     let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
@@ -38,6 +40,7 @@ macro_rules! log_impl {
                         let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
                         __dp += __w;
                     })*
+                    __buf[0..8].copy_from_slice(&($crate::timestamp::now()).to_le_bytes());
                 }).ok();
             }
         }

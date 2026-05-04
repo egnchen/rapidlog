@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use rapidlog::{Backend, BackendOptions, Frontend, LevelFilter, LogLevel, Sink};
+use rapidlog::{Backend, BackendOptions, Frontend, LevelFilter, LogLevel, QueueMode, Sink};
 
 struct CountingSink {
     count: AtomicUsize,
@@ -38,6 +38,7 @@ fn integration_single_thread_logging() {
     let backend = Backend::start(BackendOptions {
         sleep_duration: Duration::from_millis(1),
         min_batch_size: 1,
+        ..Default::default()
     });
 
     Frontend::preallocate();
@@ -89,6 +90,7 @@ fn integration_multi_thread_logging() {
     let backend = Backend::start(BackendOptions {
         sleep_duration: Duration::from_millis(1),
         min_batch_size: 1,
+        ..Default::default()
     });
 
     let num_threads = 4;
@@ -156,6 +158,7 @@ fn integration_level_filtering() {
     let backend = Backend::start(BackendOptions {
         sleep_duration: Duration::from_millis(1),
         min_batch_size: 1,
+        ..Default::default()
     });
 
     Frontend::preallocate();
@@ -210,6 +213,7 @@ fn integration_filter_trait_blocking() {
     let backend = Backend::start(BackendOptions {
         sleep_duration: Duration::from_millis(1),
         min_batch_size: 1,
+        ..Default::default()
     });
 
     Frontend::preallocate();
@@ -258,6 +262,7 @@ fn integration_timestamps_are_present() {
     let backend = Backend::start(BackendOptions {
         sleep_duration: Duration::from_millis(1),
         min_batch_size: 1,
+        ..Default::default()
     });
 
     Frontend::preallocate();
@@ -316,4 +321,111 @@ fn integration_timestamps_are_present() {
         assert!(nanos < 1_000_000_000);
         assert!(secs > 1_700_000_000, "timestamp too old: {secs}");
     }
+}
+
+#[test]
+fn integration_unbounded_no_data_loss() {
+    let sink = CountingSink::new();
+    let logger = Frontend::create_or_get_logger("integration_unbounded", vec![sink.clone()]);
+    logger.set_log_level(LogLevel::TraceL3);
+
+    let backend = Backend::start(BackendOptions {
+        sleep_duration: Duration::from_millis(1),
+        min_batch_size: 1,
+        ..Default::default()
+    });
+
+    let num_threads = 4;
+    let msgs_per_thread = 200;
+    let total_messages = num_threads * msgs_per_thread;
+    let mut handles = vec![];
+
+    for t in 0..num_threads {
+        let logger = logger.clone();
+        let handle = thread::spawn(move || {
+            Frontend::set_queue_mode(QueueMode::UnboundedBlocking);
+            for i in 0..msgs_per_thread {
+                rapidlog::log_info!(logger, "unbounded_t{}_i{}", t, i);
+            }
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    let start = std::time::Instant::now();
+    loop {
+        if sink.count.load(Ordering::Relaxed) >= total_messages {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(30) {
+            panic!(
+                "timeout: only {}/{} messages processed",
+                sink.count.load(Ordering::Relaxed),
+                total_messages
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    backend.stop();
+    let mut backend = backend;
+    backend.join();
+
+    assert_eq!(sink.count.load(Ordering::Relaxed), total_messages);
+
+    let msgs = sink.messages.lock().unwrap();
+    for t in 0..num_threads {
+        for i in 0..msgs_per_thread {
+            let expected = format!("unbounded_t{t}_i{i}");
+            assert!(
+                msgs.iter().any(|m| m.contains(&expected)),
+                "missing message: {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn integration_bounded_does_not_panic() {
+    let sink = CountingSink::new();
+    let logger = Frontend::create_or_get_logger("integration_bounded", vec![sink.clone()]);
+    logger.set_log_level(LogLevel::TraceL3);
+
+    let backend = Backend::start(BackendOptions {
+        sleep_duration: Duration::from_millis(1),
+        min_batch_size: 1,
+        ..Default::default()
+    });
+
+    let num_threads = 2;
+    let msgs_per_thread = 500;
+    let mut handles = vec![];
+
+    for t in 0..num_threads {
+        let logger = logger.clone();
+        let handle = thread::spawn(move || {
+            Frontend::set_queue_mode(QueueMode::BoundedDropping);
+            for i in 0..msgs_per_thread {
+                rapidlog::log_info!(logger, "bounded_t{}_i{}", t, i);
+            }
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    // Wait a bit for backend to process whatever did get through
+    thread::sleep(Duration::from_millis(500));
+
+    backend.stop();
+    let mut backend = backend;
+    backend.join();
+
+    // We don't assert a minimum count — just that no panic occurred
+    let _count = sink.count.load(Ordering::Relaxed);
 }

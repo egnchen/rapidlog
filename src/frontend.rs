@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::config::QueueMode;
 use crate::logger::Logger;
 use crate::sink::Sink;
 use crate::thread_context::ThreadContext;
@@ -13,6 +14,10 @@ impl Frontend {
 
     pub fn preallocate() {
         ThreadContext::init();
+    }
+
+    pub fn set_queue_mode(mode: QueueMode) {
+        ThreadContext::init_with_mode(mode, crate::config::DEFAULT_START_CAPACITY);
     }
 }
 

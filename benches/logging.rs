@@ -4,14 +4,7 @@ use std::sync::Arc;
 use criterion::{Criterion, criterion_group, criterion_main};
 use rapidlog::arg::DebugArg;
 use rapidlog::thread_context::ThreadContext;
-use rapidlog::{Frontend, LogLevel, Sink};
-
-struct NullSink;
-
-impl Sink for NullSink {
-    fn write(&self, _formatted: &str) {}
-    fn flush(&self) {}
-}
+use rapidlog::{Frontend, LogLevel, NullSink};
 
 fn drain_queue() {
     let _ = ThreadContext::poll_all_registered_queues();
