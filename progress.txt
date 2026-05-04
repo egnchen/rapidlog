@@ -35,6 +35,12 @@
 - Timestamp still hardcoded to 0 — Phase 3: TSC via `std::arch::x86_64::_rdtsc()`
 - Custom SPSC ring buffer with explicit memory ordering could replace `rtrb` for more control
 - Ring buffer `write_chunk_uninit()` still zero-inits via `write_bytes()` — could skip if we ensure all bytes written
+
+**Benchmark results (2.7 vs 2.0):**
+- 1 integer: 10.4 ns → 3.35 ns (3.1×, -68%)
+- 2 floats: 11.5 ns → 3.63 ns (3.2×, -68%)
+- 3 strings: 15.3 ns → 5.22 ns (2.9×, -65%)
+- 1 Vec<String>: 204 ns → 31.9 ns (6.4×, -83%)
 ---
 ## [2026-05-04] — 1.1 Project Scaffold
 - Added dependencies to Cargo.toml: `rtrb`, `rkyv` (with `std` feature), `rkyv_derive`, `parking_lot`, `anstream`, `is-terminal`, `time`, `thiserror`
