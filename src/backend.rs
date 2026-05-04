@@ -95,30 +95,49 @@ impl Backend {
             decoded.sort_unstable_by_key(|(m, _)| m.timestamp_ns);
 
             for (archived, args_bytes) in &decoded {
-                let formatted = Self::format_message(archived, args_bytes);
+                // SAFETY: metadata_ptr and logger_ptr are stored as raw pointers
+                // from valid &'static Metadata and Arc<Logger> at log call sites.
+                // Both allocations outlive the backend worker.
                 let metadata: &Metadata =
                     unsafe { &*(archived.metadata_ptr as usize as *const Metadata) };
                 let logger: &Logger = unsafe { &*(archived.logger_ptr as usize as *const Logger) };
 
-                if (metadata.level as u8) >= logger.log_level().as_usize() as u8 {
-                    for sink in &logger.sinks {
-                        sink.write(&formatted);
-                    }
+                if metadata.level.as_usize() < logger.log_level().as_usize() {
+                    continue;
+                }
+
+                let decoded_args = if !args_bytes.is_empty() {
+                    arg::decode_args(args_bytes)
+                } else {
+                    vec![]
+                };
+
+                let filters = logger.filters.read();
+                let filter_pass = filters.iter().all(|f| f.accept(metadata, &decoded_args));
+                drop(filters);
+                if !filter_pass {
+                    continue;
+                }
+
+                let formatted = Self::format_message(archived, &decoded_args);
+                for sink in &logger.sinks {
+                    sink.write(&formatted);
                 }
             }
         }
     }
 
-    fn format_message(archived: &ArchivedLogMessage, args_bytes: &[u8]) -> String {
-        let timestamp_ns = archived.timestamp_ns;
+    fn format_message(archived: &ArchivedLogMessage, args: &[arg::DecodedArg]) -> String {
+        let display_ns = crate::timestamp::to_display_nanos(archived.timestamp_ns);
+        // SAFETY: metadata_ptr points to a &'static Metadata from the log call site
+        // that outlives the backend worker.
         let metadata: &Metadata = unsafe { &*(archived.metadata_ptr as usize as *const Metadata) };
 
-        let secs = timestamp_ns / 1_000_000_000;
-        let nanos = (timestamp_ns % 1_000_000_000) as u32;
+        let secs = display_ns / 1_000_000_000;
+        let nanos = (display_ns % 1_000_000_000) as u32;
 
-        let body = if !args_bytes.is_empty() {
-            let decoded = arg::decode_args(args_bytes);
-            arg::format_with_args(metadata.format_str, &decoded)
+        let body = if !args.is_empty() {
+            arg::format_with_args(metadata.format_str, args)
         } else {
             metadata.format_str.to_string()
         };
@@ -134,9 +153,11 @@ impl Backend {
 mod tests {
     use super::*;
     use crate::arg::LogArg;
+    use crate::filter::LevelFilter;
     use crate::level::LogLevel;
     use crate::logger::Logger;
     use crate::sink::Sink;
+    use crate::thread_context::TEST_SERIAL;
     use std::sync::Mutex as StdMutex;
 
     struct CountingSink {
@@ -161,6 +182,7 @@ mod tests {
 
     #[test]
     fn backend_start_and_stop() {
+        let _guard = TEST_SERIAL.lock().unwrap();
         let backend = Backend::start(BackendOptions::default());
         backend.stop();
         let mut backend = backend;
@@ -169,6 +191,7 @@ mod tests {
 
     #[test]
     fn backend_processes_messages() {
+        let _guard = TEST_SERIAL.lock().unwrap();
         let sink = CountingSink::new();
         let logger = Logger::new("test_backend".to_string(), vec![sink.clone()]);
         logger.set_log_level(LogLevel::TraceL3);
@@ -244,7 +267,8 @@ mod tests {
 
         let archived = LogMessage::decode(&buf).unwrap();
         let args_bytes = &buf[ARCHIVED_HEADER_SIZE..][..archived.args_len as usize];
-        let formatted = Backend::format_message(&archived, args_bytes);
+        let decoded = arg::decode_args(args_bytes);
+        let formatted = Backend::format_message(&archived, &decoded);
 
         assert!(formatted.contains("fmt: 123 456"), "got: {formatted}");
         assert!(formatted.contains("[Warning]"), "got: {formatted}");
@@ -253,6 +277,7 @@ mod tests {
 
     #[test]
     fn messages_sorted_by_timestamp() {
+        let _guard = TEST_SERIAL.lock().unwrap();
         let sink = CountingSink::new();
         let logger = Logger::new("test_sort".to_string(), vec![sink.clone()]);
         logger.set_log_level(LogLevel::TraceL3);
@@ -285,5 +310,43 @@ mod tests {
         backend.join();
 
         assert!(*sink.count.lock().unwrap() >= 3);
+    }
+
+    #[test]
+    fn filter_blocks_messages() {
+        let _guard = TEST_SERIAL.lock().unwrap();
+        let sink = CountingSink::new();
+        let logger = Logger::new("test_filter".to_string(), vec![sink.clone()]);
+        logger.set_log_level(LogLevel::TraceL3);
+        logger.add_filter(Arc::new(LevelFilter::new(LogLevel::Error)));
+
+        let meta = Box::leak(Box::new(Metadata::new(
+            LogLevel::Info,
+            "filtered out",
+            "test.rs",
+            1,
+            "test",
+        )));
+
+        let total_size = ARCHIVED_HEADER_SIZE + 1;
+        let mut buf = vec![0u8; total_size];
+        let msg = LogMessage::new(100, meta, Arc::as_ptr(&logger), 1);
+        msg.serialize_header_into(&mut buf[..ARCHIVED_HEADER_SIZE]);
+        buf[ARCHIVED_HEADER_SIZE] = 0;
+
+        ThreadContext::init();
+        ThreadContext::push(&buf).unwrap();
+
+        let backend = Backend::start(BackendOptions {
+            sleep_duration: Duration::from_millis(1),
+            min_batch_size: 1,
+        });
+
+        thread::sleep(Duration::from_millis(50));
+        backend.stop();
+        let mut backend = backend;
+        backend.join();
+
+        assert_eq!(*sink.count.lock().unwrap(), 0);
     }
 }

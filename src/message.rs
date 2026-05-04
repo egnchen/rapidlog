@@ -46,6 +46,10 @@ impl LogMessage {
         if raw.len() < ARCHIVED_HEADER_SIZE {
             return None;
         }
+        // SAFETY: raw.as_ptr() points to a valid buffer of at least
+        // ARCHIVED_HEADER_SIZE bytes (checked above). read_unaligned
+        // handles any alignment; the fields are read at their exact
+        // rkyv archive offsets.
         unsafe {
             let ptr = raw.as_ptr();
             Some(ArchivedLogMessage {

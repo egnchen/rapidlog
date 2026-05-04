@@ -11,6 +11,9 @@ macro_rules! log_impl {
                 module_path!(),
             );
             #[allow(unused_unsafe)]
+            // SAFETY: as_ptr returns a valid pointer from an Arc that lives for
+            // the duration of this expression. The Logger is not deallocated
+            // while this call is active.
             if unsafe { ($crate::logger::Logger::log_level(&*std::sync::Arc::as_ptr(&($logger)))) }.as_usize() <= $level.as_usize() {
                 let _arg_count: usize = 0 $(+ { let _ = &$arg; 1 })*;
                 let _tags_size = 1 + _arg_count;
@@ -20,9 +23,7 @@ macro_rules! log_impl {
 
                 $crate::thread_context::ThreadContext::push_encoded(_total_msg, |__buf| {
                     let msg = $crate::message::LogMessage::new(
-                        // TODO(tsc): replace 0u64 with rdtsc() for nanosecond timestamps.
-                        // Expected cost: ~5-15ns. Gate behind cfg(target_arch = "x86_64") feature.
-                        0u64, _META,
+                        $crate::timestamp::now(), _META,
                         std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
                         _total_args as u16,
                     );
@@ -43,6 +44,13 @@ macro_rules! log_impl {
     };
 }
 
+// — log_trace_l3! — disabled at max_level_debug and above —————————————————
+#[cfg(not(any(
+    feature = "max_level_debug",
+    feature = "max_level_info",
+    feature = "max_level_warning",
+    feature = "max_level_error",
+)))]
 #[macro_export]
 macro_rules! log_trace_l3 {
     ($logger:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {
@@ -50,6 +58,24 @@ macro_rules! log_trace_l3 {
     };
 }
 
+#[cfg(any(
+    feature = "max_level_debug",
+    feature = "max_level_info",
+    feature = "max_level_warning",
+    feature = "max_level_error",
+))]
+#[macro_export]
+macro_rules! log_trace_l3 {
+    ($($tt:tt)*) => {};
+}
+
+// — log_trace_l2! — disabled at max_level_debug and above —————————————————
+#[cfg(not(any(
+    feature = "max_level_debug",
+    feature = "max_level_info",
+    feature = "max_level_warning",
+    feature = "max_level_error",
+)))]
 #[macro_export]
 macro_rules! log_trace_l2 {
     ($logger:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {
@@ -57,6 +83,24 @@ macro_rules! log_trace_l2 {
     };
 }
 
+#[cfg(any(
+    feature = "max_level_debug",
+    feature = "max_level_info",
+    feature = "max_level_warning",
+    feature = "max_level_error",
+))]
+#[macro_export]
+macro_rules! log_trace_l2 {
+    ($($tt:tt)*) => {};
+}
+
+// — log_trace_l1! — disabled at max_level_debug and above —————————————————
+#[cfg(not(any(
+    feature = "max_level_debug",
+    feature = "max_level_info",
+    feature = "max_level_warning",
+    feature = "max_level_error",
+)))]
 #[macro_export]
 macro_rules! log_trace_l1 {
     ($logger:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {
@@ -64,6 +108,23 @@ macro_rules! log_trace_l1 {
     };
 }
 
+#[cfg(any(
+    feature = "max_level_debug",
+    feature = "max_level_info",
+    feature = "max_level_warning",
+    feature = "max_level_error",
+))]
+#[macro_export]
+macro_rules! log_trace_l1 {
+    ($($tt:tt)*) => {};
+}
+
+// — log_debug! — disabled at max_level_info and above —————————————————————
+#[cfg(not(any(
+    feature = "max_level_info",
+    feature = "max_level_warning",
+    feature = "max_level_error",
+)))]
 #[macro_export]
 macro_rules! log_debug {
     ($logger:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {
@@ -71,6 +132,18 @@ macro_rules! log_debug {
     };
 }
 
+#[cfg(any(
+    feature = "max_level_info",
+    feature = "max_level_warning",
+    feature = "max_level_error",
+))]
+#[macro_export]
+macro_rules! log_debug {
+    ($($tt:tt)*) => {};
+}
+
+// — log_info! — disabled at max_level_warning and above ———————————————————
+#[cfg(not(any(feature = "max_level_warning", feature = "max_level_error",)))]
 #[macro_export]
 macro_rules! log_info {
     ($logger:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {
@@ -78,6 +151,14 @@ macro_rules! log_info {
     };
 }
 
+#[cfg(any(feature = "max_level_warning", feature = "max_level_error",))]
+#[macro_export]
+macro_rules! log_info {
+    ($($tt:tt)*) => {};
+}
+
+// — log_warning! — disabled at max_level_error ————————————————————————————
+#[cfg(not(feature = "max_level_error"))]
 #[macro_export]
 macro_rules! log_warning {
     ($logger:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {
@@ -85,6 +166,13 @@ macro_rules! log_warning {
     };
 }
 
+#[cfg(feature = "max_level_error")]
+#[macro_export]
+macro_rules! log_warning {
+    ($($tt:tt)*) => {};
+}
+
+// — log_error! and log_critical! — never disabled —————————————————————————
 #[macro_export]
 macro_rules! log_error {
     ($logger:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {

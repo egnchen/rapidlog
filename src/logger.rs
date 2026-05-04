@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicU8;
 
 use parking_lot::RwLock;
 
+use crate::filter::Filter;
 use crate::level::LogLevel;
 use crate::sink::Sink;
 
@@ -15,6 +16,7 @@ pub struct Logger {
     pub name: String,
     pub log_level: AtomicU8,
     pub sinks: Vec<Arc<dyn Sink>>,
+    pub(crate) filters: RwLock<Vec<Arc<dyn Filter>>>,
 }
 
 impl Logger {
@@ -27,6 +29,7 @@ impl Logger {
             name,
             log_level: AtomicU8::new(LogLevel::Info.as_usize() as u8),
             sinks,
+            filters: RwLock::new(Vec::new()),
         });
         registry.insert(logger.name.clone(), Arc::clone(&logger));
         logger
@@ -46,11 +49,25 @@ impl Logger {
         let val = self.log_level.load(std::sync::atomic::Ordering::Relaxed);
         LogLevel::from_usize(val as usize).unwrap_or(LogLevel::Info)
     }
+
+    /// Adds a runtime filter evaluated by the backend before sink dispatch.
+    ///
+    /// Multiple filters are AND-combined: a message must pass ALL of them
+    /// (in addition to the logger's log level check) to be delivered.
+    pub fn add_filter(&self, filter: Arc<dyn Filter>) {
+        self.filters.write().push(filter);
+    }
+
+    /// Removes all runtime filters from this logger.
+    pub fn clear_filters(&self) {
+        self.filters.write().clear();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::filter::LevelFilter;
     use crate::sinks::ConsoleSink;
 
     fn dummy_sink() -> Arc<dyn Sink> {
@@ -95,5 +112,20 @@ mod tests {
         let found = Logger::get("get_test");
         assert!(found.is_some());
         assert!(Arc::ptr_eq(&logger, &found.unwrap()));
+    }
+
+    #[test]
+    fn add_and_clear_filters() {
+        let logger = Logger::new("filter_test".to_string(), vec![dummy_sink()]);
+        assert_eq!(logger.filters.read().len(), 0);
+
+        logger.add_filter(Arc::new(LevelFilter::new(LogLevel::Warning)));
+        assert_eq!(logger.filters.read().len(), 1);
+
+        logger.add_filter(Arc::new(LevelFilter::new(LogLevel::Error)));
+        assert_eq!(logger.filters.read().len(), 2);
+
+        logger.clear_filters();
+        assert_eq!(logger.filters.read().len(), 0);
     }
 }

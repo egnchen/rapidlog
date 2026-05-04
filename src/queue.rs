@@ -41,11 +41,14 @@ impl SpscProducer {
 
         let (first, second) = chunk.as_mut_slices();
         let first_ptr = first.as_mut_ptr() as *mut u8;
-        let header = (msg_len as u64).to_le();
+        let header = msg_len as u32;
 
+        // SAFETY: chunk was obtained from write_chunk_uninit, guaranteeing
+        // at least padded bytes of uninitialized memory. We write the 8-byte
+        // header + payload + zero-fill padding to exactly padded bytes.
         unsafe {
             if total <= first.len() {
-                (first_ptr as *mut u64).write_unaligned(header);
+                (first_ptr as *mut u32).write_unaligned(header);
                 std::ptr::copy_nonoverlapping(data.as_ptr(), first_ptr.add(HEADER_SIZE), msg_len);
                 let pad = first.len() - total;
                 if pad > 0 {
@@ -56,7 +59,7 @@ impl SpscProducer {
                 }
             } else {
                 let first_data = first.len().saturating_sub(HEADER_SIZE);
-                (first_ptr as *mut u64).write_unaligned(header);
+                (first_ptr as *mut u32).write_unaligned(header);
                 std::ptr::copy_nonoverlapping(
                     data.as_ptr(),
                     first_ptr.add(HEADER_SIZE),
@@ -92,12 +95,14 @@ impl SpscProducer {
             .map_err(|_| PushError::Full)?;
 
         let (first, second) = chunk.as_mut_slices();
-        let header = (total_msg as u64).to_le();
+        let header = total_msg as u32;
 
         if total <= first.len() {
+            // SAFETY: write_chunk_uninit guarantees at least padded bytes.
+            // We write header + encode payload + zero-fill padding.
             unsafe {
                 let p = first.as_mut_ptr() as *mut u8;
-                (p as *mut u64).write_unaligned(header);
+                (p as *mut u32).write_unaligned(header);
                 let payload = std::slice::from_raw_parts_mut(p.add(HEADER_SIZE), total_msg);
                 let result = encode(payload);
                 let pad = first.len() - total;
@@ -114,9 +119,10 @@ impl SpscProducer {
             let mut tmp = vec![0u8; total_msg];
             let result = encode(&mut tmp);
 
+            // SAFETY: chunk bounds checked; tmp holds exactly total_msg bytes.
             unsafe {
                 let p = first.as_mut_ptr() as *mut u8;
-                (p as *mut u64).write_unaligned(header);
+                (p as *mut u32).write_unaligned(header);
                 let first_data = first.len().saturating_sub(HEADER_SIZE);
                 std::ptr::copy_nonoverlapping(tmp.as_ptr(), p.add(HEADER_SIZE), first_data);
                 let remaining = total_msg.saturating_sub(first_data);
