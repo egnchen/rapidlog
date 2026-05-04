@@ -70,12 +70,15 @@ impl RotatingFileSink {
                 SystemTime::now() + Duration::from_secs(86400 * 365 * 100)
             }
             RotationPolicy::TimeBased { interval } => {
-                let now = SystemTime::now();
-                let dur = match interval {
-                    TimeInterval::Hourly => Duration::from_secs(3600),
-                    TimeInterval::Daily => Duration::from_secs(86400),
+                let now = SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let next = match interval {
+                    TimeInterval::Hourly => (now / 3600 + 1) * 3600,
+                    TimeInterval::Daily => (now / 86400 + 1) * 86400,
                 };
-                now + dur
+                std::time::UNIX_EPOCH + Duration::from_secs(next)
             }
         }
     }
@@ -86,9 +89,11 @@ impl RotatingFileSink {
         base_path: &Path,
     ) -> std::io::Result<()> {
         if let Some(mut w) = state.writer.take() {
-            // flush buffer; into_inner cannot fail after a successful flush
-            let _ = w.flush();
-            let _ = w.into_inner().ok();
+            // flush buffer; if flush or into_inner fails, the rename won't lose
+            // the original data since the file handle stays open until dropped
+            if w.flush().is_ok() {
+                w.into_inner().ok();
+            }
         }
 
         state.rotation_index += 1;
@@ -118,8 +123,9 @@ impl Sink for RotatingFileSink {
             let _ = Self::rotate_inner(&mut state, &self.policy, &self.base_path);
         }
 
-        if let Some(ref mut w) = state.writer {
-            let _ = writeln!(w, "{formatted}");
+        if let Some(ref mut w) = state.writer
+            && writeln!(w, "{formatted}").is_ok()
+        {
             state.bytes_written += add_bytes;
         }
     }

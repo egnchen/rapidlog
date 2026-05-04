@@ -77,6 +77,12 @@ fn bench_one_vec_string(c: &mut Criterion) {
     let logger = Frontend::create_or_get_logger("bench_vec", vec![Arc::new(NullSink)]);
     logger.set_log_level(LogLevel::TraceL3);
 
+    let v: Vec<String> = vec![
+        "alpha".to_string(),
+        "beta_beta_beta".to_string(),
+        "gamma".to_string(),
+    ];
+
     c.bench_function("1 Vec<String>", |b| {
         b.iter_custom(|iters| {
             let l = logger.clone();
@@ -84,12 +90,7 @@ fn bench_one_vec_string(c: &mut Criterion) {
             drain_queue();
             let start = std::time::Instant::now();
             for _ in 0..iters {
-                let v: Vec<String> = vec![
-                    "alpha".to_string(),
-                    "beta_beta_beta".to_string(),
-                    "gamma".to_string(),
-                ];
-                let dv = DebugArg(black_box(v));
+                let dv = DebugArg(black_box(&v));
                 rapidlog::log_info!(l, "vec: {:?}", dv);
             }
             drain_queue();

@@ -25,6 +25,7 @@ pub use frontend::Frontend;
 pub use level::LogLevel;
 pub use logger::Logger;
 pub use metadata::Metadata;
+pub use rapidlog_derive::Encode;
 pub use sink::Sink;
 pub use sinks::{
     ConsoleSink, FileMode, FileSink, NullSink, RotatingFileSink, RotationPolicy, TimeInterval,

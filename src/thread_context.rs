@@ -45,11 +45,11 @@ impl ThreadContext {
     }
 
     pub fn init() {
-        ensure_ctx_with_mode(QueueMode::BoundedDropping, queue::DEFAULT_QUEUE_CAPACITY);
+        set_or_create_ctx_with_mode(QueueMode::BoundedDropping, queue::DEFAULT_QUEUE_CAPACITY);
     }
 
     pub fn init_with_mode(mode: QueueMode, start_capacity: usize) {
-        ensure_ctx_with_mode(mode, start_capacity);
+        set_or_create_ctx_with_mode(mode, start_capacity);
     }
 
     pub fn push(data: &[u8]) -> Result<(), PushError> {
@@ -149,12 +149,15 @@ fn reset_ctx() {
     });
 }
 
-fn ensure_ctx_with_mode(mode: QueueMode, start_capacity: usize) -> *mut ThreadContext {
+fn ensure_ctx_default() -> *mut ThreadContext {
     CTX_PTR.with(|cell| {
         let mut ptr = cell.get();
         if ptr == 0 {
             CTX_HOLDER.with(|holder| {
-                let ctx = Box::new(ThreadContext::with_mode(mode, start_capacity));
+                let ctx = Box::new(ThreadContext::with_mode(
+                    QueueMode::BoundedDropping,
+                    queue::DEFAULT_QUEUE_CAPACITY,
+                ));
                 ptr = Box::into_raw(ctx) as usize;
                 cell.set(ptr);
                 // SAFETY: ptr came from Box::into_raw on the same allocation
@@ -167,9 +170,29 @@ fn ensure_ctx_with_mode(mode: QueueMode, start_capacity: usize) -> *mut ThreadCo
     })
 }
 
+fn set_or_create_ctx_with_mode(mode: QueueMode, start_capacity: usize) -> *mut ThreadContext {
+    CTX_PTR.with(|cell| {
+        let mut ptr = cell.get();
+        if ptr == 0 {
+            CTX_HOLDER.with(|holder| {
+                let ctx = Box::new(ThreadContext::with_mode(mode, start_capacity));
+                ptr = Box::into_raw(ctx) as usize;
+                cell.set(ptr);
+                let cleanup = unsafe { Box::from_raw(ptr as *mut ThreadContext) };
+                *holder.borrow_mut() = Some(cleanup);
+            });
+        } else {
+            // SAFETY: ptr was allocated by Box::into_raw and is still alive
+            // (single-thread ownership via TLS, pointer != 0 checked above).
+            unsafe { &mut *(ptr as *mut ThreadContext) }.mode = mode;
+        }
+        ptr as *mut ThreadContext
+    })
+}
+
 #[inline]
 fn get_ctx() -> *mut ThreadContext {
-    ensure_ctx_with_mode(QueueMode::BoundedDropping, queue::DEFAULT_QUEUE_CAPACITY)
+    ensure_ctx_default()
 }
 
 #[cfg(test)]

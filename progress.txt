@@ -109,7 +109,60 @@
   - Un-exported helper macros can't be called via `$crate::name` from exported macros — must use `#[macro_export] #[doc(hidden)]`
 ---
 
-## [2026-05-04] — Phase 3: Advanced Features (3.0, 3.4, 3.1, 3.2)
+## [2026-05-04] — Phase 3: Custom Serialization Format
+
+### Overview
+Replaced the rkyv-based serialization with a self-describing recursive schema bytecode. Removed rkyv, rkyv_derive, and bytecheck dependencies. The new system embeds type schemas directly in the log message payload, enabling zero-copy, zero-allocation decoding on the backend thread.
+
+### Changes
+- **`src/arg.rs`**: Complete rewrite. Schema bytecode opcodes (Unit, SignedInt, UnsignedInt, Float, Str, Char, Bool, SEQ, TUPLE, STRUCT, ENUM, USER_DEFINED). `Encode` trait with `SCHEMA`, `encode_to()`, `max_encoded_size()`. `HasStringTable` trait. `measure_schema()` computes schema byte length. `format_payload()` recursive zero-copy formatter that writes to `&mut dyn fmt::Write`. `decode_args()` and `format_body()` for the backend. `DisplayArg<T>` and `DebugArg<T>` wrappers encode as Str(u16) with pre-formatting. Native impls for i8-i128, u8-u128, f32, f64, bool, char, (), &str, String, usize.
+- **`src/message.rs`**: Replaced `LogMessage` + `ArchivedLogMessage` (rkyv) with plain `ArchivedHeader` struct: 4×u64 (timestamp, metadata_ptr, logger_ptr, _reserved). 32 bytes. `decode()` uses `ptr::read_unaligned` on individual fields. `serialize_into()` writes LE bytes manually. Removed `args_len` field — queue header already carries total size.
+- **`src/metadata.rs`**: Simplified back to 5 fields (level, format_str, file, line, module_path). Schemas are stored inline in the payload, not in Metadata. `UserFormatter` moved to `src/arg.rs`.
+- **`src/macros.rs`**: Rewrote `log_impl!` hot path. Encodes `[arg_count][schema₀..][payload₀..]` inline. Uses `schema_len()` and `schema_of()` helpers to satisfy macro repetition rules. Writes header via raw pointer stores (metadata_ptr, logger_ptr), timestamp last.
+- **`src/backend.rs`**: Updated to use `ArchivedHeader::decode()`. Messages are `Vec<(ArchivedHeader, Vec<u8>)>` — no extra args copy. Calls `arg::format_body()` which walks format string + schemas + payload in lockstep. Filter trait now takes `&[u8]` (raw payload) instead of `&[DecodedArg]`.
+- **`src/filter.rs`**: Changed `Filter::accept()` signature from `&[DecodedArg]` to `&[u8]`. `LevelFilter` ignores args.
+- **`rapidlog_derive/`**: New proc-macro crate. `#[derive(Encode)]` generates `Encode` + `HasStringTable` impls for named structs and enums. Generates schema bytecode with field/variant names in null-terminated string tables. Supports unit variants and single-field tuple variants.
+- **`Cargo.toml`**: Removed `rkyv`, `rkyv_derive`, `bytecheck`. Added `rapidlog_derive = { path = "./rapidlog_derive" }`. Kept `time` (used by PatternFormatter).
+- **`benches/logging.rs`**: Moved `Vec<String>` allocation outside the benchmark timing loop. Uses `DebugArg(black_box(&v))`.
+- **`docs/schema.md`**: Complete documentation of the schema bytecode format with opcode tables, payload layout, and examples for all types.
+- **`src/lib.rs`**: Re-exports `rapidlog_derive::Encode`.
+
+### Payload format
+```
+[arg_count: u8] [schema₀...] [schema₁...] ... [payload₀...] [payload₁...] ...
+```
+
+### Architecture decisions
+- Schemas stored in payload (not Metadata) because `const _META` in macros requires all arguments to be const-evaluable. Type-level schemas can't be extracted from expressions in `const` context without evaluating the expression.
+- `format_payload()` uses `&mut dyn fmt::Write` (dynamic dispatch) for recursive calls — backend-only, not hot path.
+- `format_payload_measure()` dry-runs formatting to compute payload size without output — used by `format_body()` to advance through the buffer.
+- Proc-macro derives generate `Encode + HasStringTable` together for structs/enums with string table for field/variant names.
+
+### Test results
+- 121 unit tests, 7 integration tests — all pass
+- `cargo clippy -- -D warnings` — clean
+- `cargo fmt -- --check` — clean
+
+### Files changed/created
+- **Rewritten**: `src/arg.rs`, `src/message.rs`, `src/metadata.rs`, `src/macros.rs`, `src/backend.rs`, `src/filter.rs`
+- **Modified**: `Cargo.toml`, `src/lib.rs`, `benches/logging.rs`
+- **Created**: `rapidlog_derive/Cargo.toml`, `rapidlog_derive/src/lib.rs`, `docs/schema.md`
+
+### Learnings
+- `const` blocks in macros require all values to be const-evaluable — even unused function parameters must be const
+- Declarative macros can't extract types from expression metavariables; need helper functions that reference the expression
+- `syn::Variants` doesn't exist in syn 2.x — use `Punctuated<Variant, Comma>` directly
+- Schema bytecode is highly compact: 1 byte for all builtin primitives, variable-length for compounds
+- UserFormatter callback uses `&mut fmt::Formatter` but format_payload uses `&mut dyn fmt::Write` for flexibility — these are incompatible without casting
+- Proc-macro derive crates need `syn` with `"full"` feature for Data::Enum support
+- The `_reserved: u64` field in the header simplifies to 32-byte fixed size with room for future metadata
+
+### Remaining
+- Benchmarks not yet re-run with the new encoding (expected similar or better performance)
+- Derive macro only supports named structs and simple enums; tuple structs and multi-field enum variants are TODO
+- TSC recalibration on backend thread (periodic)
+---
+
 
 ### 3.0 — Const TLS hot-path optimization (`src/thread_context.rs`)
 - Replaced `UnsafeCell<ThreadContext>` with dual-TLS: `CTX_PTR: Cell<usize>` (const-init, local-exec model) + `CTX_HOLDER: RefCell<Option<Box<...>>>` (Drop cleanup)

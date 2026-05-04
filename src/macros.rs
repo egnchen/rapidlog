@@ -16,10 +16,10 @@ macro_rules! log_impl {
             // while this call is active.
             if unsafe { ($crate::logger::Logger::log_level(&*std::sync::Arc::as_ptr(&($logger)))) }.as_usize() <= $level.as_usize() {
                 let _arg_count: usize = 0 $(+ { let _ = &$arg; 1 })*;
-                let _tags_size = 1 + _arg_count;
-                let _payloads_size: usize = 0 $(+ $crate::arg::LogArg::log_max_size(&$arg))*;
-                let _total_args = _tags_size + _payloads_size;
-                let _total_msg = $crate::message::ARCHIVED_HEADER_SIZE + _total_args;
+                let _schemas_size: usize = 0 $(+ $crate::arg::schema_len(&$arg))*;
+                let _payloads_size: usize = 0 $(+ $crate::arg::Encode::max_encoded_size(&$arg))*;
+                let _total_args = 1 + _schemas_size + _payloads_size;
+                let _total_msg = $crate::message::HEADER_SIZE + _total_args;
 
                 $crate::thread_context::ThreadContext::push_encoded(_total_msg, |__buf: &mut [u8]| {
                     let __p = __buf.as_mut_ptr();
@@ -28,19 +28,19 @@ macro_rules! log_impl {
                             _META as *const $crate::metadata::Metadata as u64);
                         (__p.add(16) as *mut u64).write_unaligned(
                             std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger as u64);
-                        (__p.add(24) as *mut u16).write_unaligned(_total_args as u16);
+                        (__p.add(24) as *mut u64).write_unaligned(0u64);
                     }
-                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
-                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
-                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
+                    __buf[$crate::message::HEADER_SIZE] = _arg_count as u8;
+                    let mut __sp = $crate::message::HEADER_SIZE + 1;
+                    let mut __dp = $crate::message::HEADER_SIZE + 1 + _schemas_size;
                     $({
-                        let __a = &$arg;
-                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
-                        __tp += 1;
-                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
+                        let __s = $crate::arg::schema_of(&$arg);
+                        __buf[__sp..__sp + __s.len()].copy_from_slice(__s);
+                        __sp += __s.len();
+                        let __w = $crate::arg::Encode::encode_to(&$arg, &mut __buf[__dp..]);
                         __dp += __w;
                     })*
-                    __buf[0..8].copy_from_slice(&($crate::timestamp::now()).to_le_bytes());
+                    __buf[0..8].copy_from_slice(&($crate::timestamp::now()).to_ne_bytes());
                 }).ok();
             }
         }

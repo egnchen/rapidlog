@@ -1,14 +1,13 @@
-use crate::arg::DecodedArg;
 use crate::level::LogLevel;
 use crate::metadata::Metadata;
 
 /// Runtime filter evaluated by the backend worker before dispatching to sinks.
 ///
 /// Filters are AND-combined: a message must pass ALL filters on its logger
-/// to be delivered. Filters have access to the metadata and decoded arguments.
+/// to be delivered. Filters have access to the metadata and raw argument payload.
 pub trait Filter: Send + Sync {
     /// Return `true` if the message should be delivered to sinks.
-    fn accept(&self, metadata: &Metadata, args: &[DecodedArg]) -> bool;
+    fn accept(&self, metadata: &Metadata, args_raw: &[u8]) -> bool;
 }
 
 /// Filters messages at or above a minimum severity level.
@@ -26,7 +25,7 @@ impl LevelFilter {
 }
 
 impl Filter for LevelFilter {
-    fn accept(&self, metadata: &Metadata, _args: &[DecodedArg]) -> bool {
+    fn accept(&self, metadata: &Metadata, _args_raw: &[u8]) -> bool {
         metadata.level >= self.level
     }
 }

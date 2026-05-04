@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::arg;
 use crate::formatter::{FormattedRecord, PatternFormatter};
 use crate::logger::Logger;
-use crate::message::{ARCHIVED_HEADER_SIZE, ArchivedLogMessage, LogMessage};
+use crate::message::{ArchivedHeader, HEADER_SIZE};
 use crate::metadata::Metadata;
 use crate::thread_context::ThreadContext;
 
@@ -87,43 +87,34 @@ impl Backend {
                 raw_messages.extend(more);
             }
 
-            let mut decoded: Vec<(ArchivedLogMessage, Vec<u8>)> = raw_messages
-                .iter()
+            let mut decoded: Vec<(ArchivedHeader, Vec<u8>)> = raw_messages
+                .into_iter()
                 .filter_map(|raw| {
-                    let header = LogMessage::decode(raw)?;
-                    let args = raw[ARCHIVED_HEADER_SIZE..][..header.args_len as usize].to_vec();
-                    Some((header, args))
+                    let header = ArchivedHeader::decode(&raw)?;
+                    Some((header, raw))
                 })
                 .collect();
 
             decoded.sort_unstable_by_key(|(m, _)| m.timestamp_ns);
 
-            for (archived, args_bytes) in &decoded {
-                // SAFETY: metadata_ptr and logger_ptr are stored as raw pointers
-                // from valid &'static Metadata and Arc<Logger> at log call sites.
-                // Both allocations outlive the backend worker.
-                let metadata: &Metadata =
-                    unsafe { &*(archived.metadata_ptr as usize as *const Metadata) };
-                let logger: &Logger = unsafe { &*(archived.logger_ptr as usize as *const Logger) };
+            for (archived, data) in &decoded {
+                let metadata: &Metadata = archived.metadata();
+                let logger: &Logger = archived.logger();
 
                 if metadata.level.as_usize() < logger.log_level().as_usize() {
                     continue;
                 }
 
-                let decoded_args = if !args_bytes.is_empty() {
-                    arg::decode_args(args_bytes)
-                } else {
-                    vec![]
-                };
+                let payload = &data[HEADER_SIZE..];
 
                 let filters = logger.filters.read();
-                let filter_pass = filters.iter().all(|f| f.accept(metadata, &decoded_args));
+                let filter_pass = filters.iter().all(|f| f.accept(metadata, payload));
                 drop(filters);
                 if !filter_pass {
                     continue;
                 }
 
-                let formatted = Self::format_message(archived, &decoded_args, formatter.as_ref());
+                let formatted = Self::format_message(archived, payload, formatter.as_ref());
                 for sink in &logger.sinks {
                     sink.write(&formatted);
                 }
@@ -132,23 +123,19 @@ impl Backend {
     }
 
     fn format_message(
-        archived: &ArchivedLogMessage,
-        args: &[arg::DecodedArg],
+        archived: &ArchivedHeader,
+        payload: &[u8],
         formatter: Option<&PatternFormatter>,
     ) -> String {
         let display_ns = crate::timestamp::to_display_nanos(archived.timestamp_ns);
         // SAFETY: metadata_ptr points to a &'static Metadata from the log call site
         // that outlives the backend worker.
-        let metadata: &Metadata = unsafe { &*(archived.metadata_ptr as usize as *const Metadata) };
+        let metadata: &Metadata = archived.metadata();
 
         let secs = display_ns / 1_000_000_000;
         let nanos = (display_ns % 1_000_000_000) as u32;
 
-        let body = if !args.is_empty() {
-            arg::format_with_args(metadata.format_str, args)
-        } else {
-            metadata.format_str.to_string()
-        };
+        let body = arg::format_body(metadata, payload);
 
         if let Some(fmtr) = formatter {
             let record = FormattedRecord {
@@ -172,7 +159,7 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arg::LogArg;
+    use crate::arg::Encode;
     use crate::filter::LevelFilter;
     use crate::level::LogLevel;
     use crate::logger::Logger;
@@ -224,25 +211,21 @@ mod tests {
             "test",
         )));
 
-        let arg_count: usize = 1;
-        let header_size = 1 + arg_count; // count byte + 1 tag
-        let payload_size = 8; // 1 int
-        let args_len = header_size + payload_size;
-        let total_size = ARCHIVED_HEADER_SIZE + args_len;
+        // Payload: count(1) + schema_i32(1) + data_i32(4)
+        let payload_size = 1 + 1 + 4;
+        let total_size = HEADER_SIZE + payload_size;
         let mut buf = vec![0u8; total_size];
 
-        let msg = LogMessage::new(
+        let header = ArchivedHeader::new(
             1_700_000_000_123_456_789,
             meta,
-            Arc::as_ptr(&logger),
-            args_len as u16,
+            Arc::as_ptr(&logger) as *const Logger,
         );
-        msg.serialize_header_into(&mut buf[..ARCHIVED_HEADER_SIZE]);
+        header.serialize_into(&mut buf[..HEADER_SIZE]);
 
-        buf[ARCHIVED_HEADER_SIZE] = 1; // arg_count
-        buf[ARCHIVED_HEADER_SIZE + 1] = arg::TAG_INT;
-
-        (42i32).log_encode(&mut buf[ARCHIVED_HEADER_SIZE + 2..]);
+        buf[HEADER_SIZE] = 1; // arg_count
+        buf[HEADER_SIZE + 1] = arg::op_signed_int(3); // i32 schema
+        42i32.encode_to(&mut buf[HEADER_SIZE + 2..]);
 
         ThreadContext::init();
         ThreadContext::push(&buf).unwrap();
@@ -273,23 +256,23 @@ mod tests {
         )));
 
         let logger = Logger::new("test_logger".to_string(), vec![]);
-        let total_size = ARCHIVED_HEADER_SIZE + 1 + 2 + 8 + 8;
-        let mut buf = vec![0u8; total_size];
+        // Payload: count(2) + schema_i32(1) + schema_i32(1) + data_i32(4) + data_i32(4)
+        let payload_size = 1 + 1 + 1 + 4 + 4;
+        let mut buf = vec![0u8; HEADER_SIZE + payload_size];
 
-        let args_len = 1 + 2 + 8 + 8; // count(1) + tags(2) + int(8) + int(8) = 19
-        let msg = LogMessage::new(1_700_000_001, meta, Arc::as_ptr(&logger), args_len as u16);
-        msg.serialize_header_into(&mut buf[..ARCHIVED_HEADER_SIZE]);
+        let header =
+            ArchivedHeader::new(1_700_000_001, meta, Arc::as_ptr(&logger) as *const Logger);
+        header.serialize_into(&mut buf[..HEADER_SIZE]);
 
-        buf[ARCHIVED_HEADER_SIZE] = 2; // arg_count
-        buf[ARCHIVED_HEADER_SIZE + 1] = arg::TAG_INT;
-        buf[ARCHIVED_HEADER_SIZE + 2] = arg::TAG_INT;
-        (123i32).log_encode(&mut buf[ARCHIVED_HEADER_SIZE + 3..]);
-        (456i32).log_encode(&mut buf[ARCHIVED_HEADER_SIZE + 3 + 8..]);
+        buf[HEADER_SIZE] = 2; // arg_count
+        buf[HEADER_SIZE + 1] = arg::op_signed_int(3); // i32 schema
+        buf[HEADER_SIZE + 2] = arg::op_signed_int(3); // i32 schema
+        123i32.encode_to(&mut buf[HEADER_SIZE + 3..]);
+        456i32.encode_to(&mut buf[HEADER_SIZE + 3 + 4..]);
 
-        let archived = LogMessage::decode(&buf).unwrap();
-        let args_bytes = &buf[ARCHIVED_HEADER_SIZE..][..archived.args_len as usize];
-        let decoded = arg::decode_args(args_bytes);
-        let formatted = Backend::format_message(&archived, &decoded, None);
+        let decoded = ArchivedHeader::decode(&buf).unwrap();
+        let payload = &buf[HEADER_SIZE..];
+        let formatted = Backend::format_message(&decoded, payload, None);
 
         assert!(formatted.contains("fmt: 123 456"), "got: {formatted}");
         assert!(formatted.contains("[Warning]"), "got: {formatted}");
@@ -307,28 +290,24 @@ mod tests {
         )));
 
         let logger = Logger::new("pat_logger".to_string(), vec![]);
-        let total_size = ARCHIVED_HEADER_SIZE + 1 + 1 + 8;
-        let mut buf = vec![0u8; total_size];
+        let payload_size = 1 + 1 + 4; // count + schema + data
+        let mut buf = vec![0u8; HEADER_SIZE + payload_size];
 
-        let args_len = 1 + 1 + 8; // count + tag + int
-        let msg = LogMessage::new(
+        let header = ArchivedHeader::new(
             1_700_000_010_000_000_000,
             meta,
-            Arc::as_ptr(&logger),
-            args_len as u16,
+            Arc::as_ptr(&logger) as *const Logger,
         );
-        msg.serialize_header_into(&mut buf[..ARCHIVED_HEADER_SIZE]);
+        header.serialize_into(&mut buf[..HEADER_SIZE]);
+        buf[HEADER_SIZE] = 1;
+        buf[HEADER_SIZE + 1] = arg::op_signed_int(3);
+        99i32.encode_to(&mut buf[HEADER_SIZE + 2..]);
 
-        buf[ARCHIVED_HEADER_SIZE] = 1;
-        buf[ARCHIVED_HEADER_SIZE + 1] = arg::TAG_INT;
-        (99i32).log_encode(&mut buf[ARCHIVED_HEADER_SIZE + 2..]);
-
-        let archived = LogMessage::decode(&buf).unwrap();
-        let args_bytes = &buf[ARCHIVED_HEADER_SIZE..][..archived.args_len as usize];
-        let decoded = arg::decode_args(args_bytes);
+        let decoded = ArchivedHeader::decode(&buf).unwrap();
+        let payload = &buf[HEADER_SIZE..];
 
         let fmt = PatternFormatter::new("[%l] %F:%L — %v");
-        let formatted = Backend::format_message(&archived, &decoded, Some(&fmt));
+        let formatted = Backend::format_message(&decoded, payload, Some(&fmt));
 
         assert!(
             formatted.starts_with("[Error] src/lib.rs:100"),
@@ -352,12 +331,11 @@ mod tests {
             "test",
         )));
 
-        for ts in [300u64, 100, 200] {
-            let total_size = ARCHIVED_HEADER_SIZE + 1; // count=0, no args
-            let mut buf = vec![0u8; total_size];
-            let msg = LogMessage::new(ts, meta, Arc::as_ptr(&logger), 1);
-            msg.serialize_header_into(&mut buf[..ARCHIVED_HEADER_SIZE]);
-            buf[ARCHIVED_HEADER_SIZE] = 0; // arg_count = 0
+        for ts in [300, 100, 200] {
+            let mut buf = vec![0u8; HEADER_SIZE + 1]; // header + count=0
+            let header = ArchivedHeader::new(ts, meta, Arc::as_ptr(&logger) as *const Logger);
+            header.serialize_into(&mut buf);
+            buf[HEADER_SIZE] = 0; // arg_count = 0
             ThreadContext::push(&buf).unwrap();
         }
 
@@ -391,11 +369,10 @@ mod tests {
             "test",
         )));
 
-        let total_size = ARCHIVED_HEADER_SIZE + 1;
-        let mut buf = vec![0u8; total_size];
-        let msg = LogMessage::new(100, meta, Arc::as_ptr(&logger), 1);
-        msg.serialize_header_into(&mut buf[..ARCHIVED_HEADER_SIZE]);
-        buf[ARCHIVED_HEADER_SIZE] = 0;
+        let mut buf = vec![0u8; HEADER_SIZE + 1]; // header + count=0
+        let header = ArchivedHeader::new(100, meta, Arc::as_ptr(&logger) as *const Logger);
+        header.serialize_into(&mut buf);
+        buf[HEADER_SIZE] = 0;
 
         ThreadContext::init();
         ThreadContext::push(&buf).unwrap();
