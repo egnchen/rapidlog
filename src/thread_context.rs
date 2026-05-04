@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::UnsafeCell;
 use std::sync::LazyLock;
 
 use parking_lot::Mutex;
@@ -8,8 +8,10 @@ use crate::queue::{self, PushError, SpscConsumer, SpscProducer};
 static CONSUMER_REGISTRY: LazyLock<Mutex<Vec<SpscConsumer>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
+// SAFETY: per-thread, single-owner. No other thread can access THREAD_CTX.
+// The closure in push/push_encoded is called synchronously, not re-entrant.
 thread_local! {
-    static THREAD_CONTEXT: RefCell<ThreadContext> = RefCell::new(ThreadContext::new());
+    static THREAD_CTX: UnsafeCell<ThreadContext> = UnsafeCell::new(ThreadContext::new());
 }
 
 pub struct ThreadContext {
@@ -30,18 +32,29 @@ impl ThreadContext {
     }
 
     pub fn init() {
-        THREAD_CONTEXT.with(|_| {});
+        THREAD_CTX.with(|_| {});
     }
 
     pub fn push(data: &[u8]) -> Result<(), PushError> {
-        THREAD_CONTEXT.with(|ctx| ctx.borrow_mut().producer.push(data))
+        THREAD_CTX.with(|ctx| unsafe { &mut *ctx.get() }.producer.push(data))
+    }
+
+    pub fn push_encoded<R>(
+        total_msg: usize,
+        encode: impl FnOnce(&mut [u8]) -> R,
+    ) -> Result<R, PushError> {
+        THREAD_CTX.with(|ctx| {
+            unsafe { &mut *ctx.get() }
+                .producer
+                .push_encoded(total_msg, encode)
+        })
     }
 
     pub fn with<F, R>(f: F) -> R
     where
         F: FnOnce(&ThreadContext) -> R,
     {
-        THREAD_CONTEXT.with(|ctx| f(&ctx.borrow()))
+        THREAD_CTX.with(|ctx| f(unsafe { &*ctx.get() }))
     }
 
     pub fn poll_all_registered_queues() -> Vec<Vec<u8>> {
@@ -92,6 +105,10 @@ mod tests {
 
     #[test]
     fn push_from_multiple_threads() {
+        // Drain stale state
+        ThreadContext::init();
+        let _ = ThreadContext::poll_all_registered_queues();
+
         let t1 = thread::spawn(|| {
             ThreadContext::init();
             ThreadContext::push(b"t1a").unwrap();
@@ -107,11 +124,8 @@ mod tests {
         t1.join().unwrap();
         t2.join().unwrap();
 
-        // Poll from the main thread
-        ThreadContext::init();
         let msgs = ThreadContext::poll_all_registered_queues();
 
-        // We should get all 4 messages, but order between threads is not guaranteed
         let mut sorted: Vec<String> = msgs
             .iter()
             .map(|m| String::from_utf8_lossy(m).to_string())
@@ -122,20 +136,19 @@ mod tests {
 
     #[test]
     fn abandoned_queue_cleanup() {
+        // Drain stale state from previous tests sharing CONSUMER_REGISTRY
+        ThreadContext::init();
+        let _ = ThreadContext::poll_all_registered_queues();
+
         let (_, cons) = queue::create_queue(1024);
         let mut registry = CONSUMER_REGISTRY.lock();
-        // Simulate: add a consumer whose producer has been dropped
         registry.push(cons);
         drop(registry);
 
-        // Poll should clean up the abandoned consumer
         let msgs = ThreadContext::poll_all_registered_queues();
         assert!(msgs.is_empty());
 
-        // After cleanup, the registry should not contain the abandoned consumer
         let registry = CONSUMER_REGISTRY.lock();
-        // Note: there may be other registrations from previous tests.
-        // We just check the abandoned one was cleaned.
         assert!(registry.iter().all(|c| !c.is_abandoned()));
     }
 }

@@ -18,9 +18,10 @@ macro_rules! log_impl {
                 let _total_args = _tags_size + _payloads_size;
                 let _total_msg = $crate::message::ARCHIVED_HEADER_SIZE + _total_args;
 
-                if _total_msg <= 512 {
-                    let mut __buf = [0u8; 512];
+                $crate::thread_context::ThreadContext::push_encoded(_total_msg, |__buf| {
                     let msg = $crate::message::LogMessage::new(
+                        // TODO(tsc): replace 0u64 with rdtsc() for nanosecond timestamps.
+                        // Expected cost: ~5-15ns. Gate behind cfg(target_arch = "x86_64") feature.
                         0u64, _META,
                         std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
                         _total_args as u16,
@@ -36,27 +37,7 @@ macro_rules! log_impl {
                         let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
                         __dp += __w;
                     })*
-                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
-                } else {
-                    let mut __buf = ::std::vec![0u8; _total_msg];
-                    let msg = $crate::message::LogMessage::new(
-                        0u64, _META,
-                        std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger,
-                        _total_args as u16,
-                    );
-                    msg.serialize_header_into(&mut __buf[..$crate::message::ARCHIVED_HEADER_SIZE]);
-                    __buf[$crate::message::ARCHIVED_HEADER_SIZE] = _arg_count as u8;
-                    let mut __tp = $crate::message::ARCHIVED_HEADER_SIZE + 1;
-                    let mut __dp = $crate::message::ARCHIVED_HEADER_SIZE + 1 + _arg_count;
-                    $({
-                        let __a = &$arg;
-                        __buf[__tp] = $crate::arg::LogArg::log_tag(__a);
-                        __tp += 1;
-                        let __w = $crate::arg::LogArg::log_encode(__a, &mut __buf[__dp..]);
-                        __dp += __w;
-                    })*
-                    $crate::thread_context::ThreadContext::push(&__buf[.._total_msg]).ok();
-                }
+                }).ok();
             }
         }
     };

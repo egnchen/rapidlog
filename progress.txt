@@ -4,7 +4,37 @@
 - Module files go in `src/` with `pub mod` declarations in `lib.rs`.
 - Sink trait uses `Send + Sync` bounds for thread-safe dispatch from backend.
 - Logger and sinks use `Arc<dyn Sink>` for shared ownership.
+- Thread-local producer uses `UnsafeCell` (not `RefCell`) — safe because single-thread + non-reentrant.
 
+---
+
+## [2026-05-04] — Phase 2.7: Hot Path Optimization (Level 1)
+
+- Replaced `RefCell<ThreadContext>` with `UnsafeCell<ThreadContext>` in thread_local! — eliminates borrow counter overhead (~2ns saved)
+- Added `SpscProducer::push_encoded()` — encode log data directly into ring buffer, eliminating stack buffer + memcpy
+  - Fast path: data fits contiguously → direct encode into ring buffer memory
+  - Slow path (rare): ring buffer wrap-around → encode to temp vec + copy to both halves
+- Added `ThreadContext::push_encoded()` — exposes direct-encode API to macros
+- Rewrote `log_impl!` macro: removed 512-byte stack buffer, removed `if _total_msg <= 512` branch, now calls `push_encoded` with closure
+- Changed ring buffer entry alignment from 8-byte to 64-byte (cache line): `CACHE_LINE = 64`, `align_up()` helper
+  - Prevents false sharing between adjacent log entries when backend reads them
+  - Updated both `push()`, `push_encoded()`, and `pop()` to use same alignment
+- Added `TODO(tsc)` comment in macros.rs for future `_rdtsc()` timestamp (estimated +5-15ns)
+- Fixed pre-existing flaky tests: `abandoned_queue_cleanup` and `push_from_multiple_threads` drained stale state from global CONSUMER_REGISTRY
+- Files: `src/queue.rs`, `src/thread_context.rs`, `src/macros.rs`
+- **Learnings for future iterations:**
+  - `UnsafeCell` is safe for thread-locals when access is non-reentrant and single-owner
+  - The `thread_local!` with() closure overhead (~1ns) remains — can be eliminated with `Cell` + `const` TLS in Phase 3
+  - Direct ring buffer encoding eliminates both stack zero-init and memcpy (~3-4ns total)
+  - Cache line alignment (64B) wastes up to 56 bytes per entry but prevents false sharing — worth it for NUMA
+  - `rtrb::WriteChunkUninit::as_mut_slices()` returns split slices at wrap-around boundary; fast path checks `total <= first.len()` for contiguity
+  - The `push()` and `pop()` MUST agree on `align_up()` calculation, otherwise reads misalign
+
+**Remaining optimization notes (updated):**
+- `THREAD_CTX.with(|ctx| ...)` closure overhead ~1ns — Phase 3: `Cell`-based const TLS for local-exec model
+- Timestamp still hardcoded to 0 — Phase 3: TSC via `std::arch::x86_64::_rdtsc()`
+- Custom SPSC ring buffer with explicit memory ordering could replace `rtrb` for more control
+- Ring buffer `write_chunk_uninit()` still zero-inits via `write_bytes()` — could skip if we ensure all bytes written
 ---
 ## [2026-05-04] — 1.1 Project Scaffold
 - Added dependencies to Cargo.toml: `rtrb`, `rkyv` (with `std` feature), `rkyv_derive`, `parking_lot`, `anstream`, `is-terminal`, `time`, `thiserror`

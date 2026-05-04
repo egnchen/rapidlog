@@ -4,6 +4,12 @@ pub const DEFAULT_QUEUE_CAPACITY: usize = 131_072;
 
 pub const HEADER_SIZE: usize = 8;
 
+pub const CACHE_LINE: usize = 64;
+
+const fn align_up(n: usize, align: usize) -> usize {
+    (n + align - 1) & !(align - 1)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushError {
     Full,
@@ -26,7 +32,7 @@ impl SpscProducer {
     pub fn push(&mut self, data: &[u8]) -> Result<(), PushError> {
         let msg_len = data.len();
         let total = HEADER_SIZE + msg_len;
-        let padded = (total + 7) & !7;
+        let padded = align_up(total, CACHE_LINE);
 
         if self.inner.slots() < padded {
             return Err(PushError::Full);
@@ -48,11 +54,11 @@ impl SpscProducer {
 
             let len_bytes = (msg_len as u32).to_ne_bytes();
 
-            if padded <= first.len() {
+            if total <= first.len() {
                 std::ptr::copy_nonoverlapping(len_bytes.as_ptr(), first_ptr, 4);
                 std::ptr::copy_nonoverlapping(data.as_ptr(), first_ptr.add(HEADER_SIZE), msg_len);
             } else {
-                let first_data = first.len() - HEADER_SIZE;
+                let first_data = first.len().saturating_sub(HEADER_SIZE);
                 std::ptr::copy_nonoverlapping(len_bytes.as_ptr(), first_ptr, 4);
                 std::ptr::copy_nonoverlapping(
                     data.as_ptr(),
@@ -72,6 +78,61 @@ impl SpscProducer {
             chunk.commit(padded);
         }
         Ok(())
+    }
+
+    pub fn push_encoded<R>(
+        &mut self,
+        total_msg: usize,
+        encode: impl FnOnce(&mut [u8]) -> R,
+    ) -> Result<R, PushError> {
+        let total = HEADER_SIZE + total_msg;
+        let padded = align_up(total, CACHE_LINE);
+
+        if self.inner.slots() < padded {
+            return Err(PushError::Full);
+        }
+
+        let mut chunk = self
+            .inner
+            .write_chunk_uninit(padded)
+            .map_err(|_| PushError::Full)?;
+
+        let (first, second) = chunk.as_mut_slices();
+        let len_bytes = (total_msg as u32).to_ne_bytes();
+
+        if total <= first.len() {
+            unsafe {
+                std::ptr::write_bytes(first.as_mut_ptr(), 0, first.len());
+                if !second.is_empty() {
+                    std::ptr::write_bytes(second.as_mut_ptr() as *mut u8, 0, second.len());
+                }
+                let p = first.as_mut_ptr() as *mut u8;
+                std::ptr::copy_nonoverlapping(len_bytes.as_ptr(), p, 4);
+                let payload = std::slice::from_raw_parts_mut(p.add(HEADER_SIZE), total_msg);
+                let result = encode(payload);
+                chunk.commit(padded);
+                Ok(result)
+            }
+        } else {
+            let mut tmp = vec![0u8; total_msg];
+            let result = encode(&mut tmp);
+
+            unsafe {
+                std::ptr::write_bytes(first.as_mut_ptr(), 0, first.len());
+                let p = first.as_mut_ptr() as *mut u8;
+                std::ptr::copy_nonoverlapping(len_bytes.as_ptr(), p, 4);
+                let first_data = first.len().saturating_sub(HEADER_SIZE);
+                std::ptr::copy_nonoverlapping(tmp.as_ptr(), p.add(HEADER_SIZE), first_data);
+                let remaining = total_msg.saturating_sub(first_data);
+                if remaining > 0 {
+                    std::ptr::write_bytes(second.as_mut_ptr(), 0, second.len());
+                    let s = second.as_mut_ptr() as *mut u8;
+                    std::ptr::copy_nonoverlapping(tmp.as_ptr().add(first_data), s, remaining);
+                }
+                chunk.commit(padded);
+            }
+            Ok(result)
+        }
     }
 }
 
@@ -93,7 +154,7 @@ impl SpscConsumer {
         len_buf.copy_from_slice(&first[..4]);
         let msg_len = u32::from_ne_bytes(len_buf) as usize;
 
-        let padded = (HEADER_SIZE + msg_len + 7) & !7;
+        let padded = align_up(HEADER_SIZE + msg_len, CACHE_LINE);
         let available = first.len() + second.len();
         if available < padded {
             return None;
