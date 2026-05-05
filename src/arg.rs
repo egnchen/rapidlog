@@ -108,6 +108,7 @@ pub const fn schema_of<T: Encode + ?Sized>(_: &T) -> &'static [u8] {
 
 /// Returns the schema length for an `Encode` implementor.
 /// Used by macros to compute total encoding size.
+#[inline]
 pub fn schema_len<T: Encode + ?Sized>(_: &T) -> usize {
     T::SCHEMA.len()
 }

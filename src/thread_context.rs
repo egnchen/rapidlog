@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::UnsafeCell;
 use std::sync::LazyLock;
 
 use parking_lot::Mutex;
@@ -9,14 +9,11 @@ use crate::queue::{self, PushError, SpscConsumer, SpscProducer};
 static CONSUMER_REGISTRY: LazyLock<Mutex<Vec<SpscConsumer>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
-// SAFETY: per-thread, single-owner. No other thread accesses these TLS slots.
-// CTX_PTR: const { Cell::new(0) } triggers local-exec TLS model — no lazy-init branch,
-// compiler emits `mov reg, fs:[offset]` on x86_64 Linux.
-// CTX_HOLDER: owns the Box<ThreadContext> so TLS destructor drops it (frees producer,
-// marks consumer abandoned for cleanup).
+// SAFETY: per-thread, single-owner. No other thread accesses this TLS slot.
+// Eagerly initialized — ThreadContext::new() runs on first access.
+// No lazy-init branch on the hot path; just CTX.with(|c| c.get()).
 thread_local! {
-    static CTX_PTR: Cell<usize> = const { Cell::new(0) };
-    static CTX_HOLDER: RefCell<Option<Box<ThreadContext>>> = const { RefCell::new(None) };
+    static CTX: UnsafeCell<ThreadContext> = UnsafeCell::new(ThreadContext::new());
 }
 
 pub struct ThreadContext {
@@ -59,17 +56,19 @@ impl ThreadContext {
     }
 
     fn push_impl(&mut self, data: &[u8]) -> Result<(), PushError> {
+        if self.mode == QueueMode::BoundedDropping {
+            return self.producer.push(data);
+        }
         loop {
             match self.producer.push(data) {
                 Ok(()) => return Ok(()),
-                Err(PushError::Full) if self.mode == QueueMode::UnboundedBlocking => {
+                Err(PushError::Full) => {
                     if let Some(new_cons) = self.producer.grow() {
                         CONSUMER_REGISTRY.lock().push(new_cons);
                     } else {
                         return Err(PushError::Full);
                     }
                 }
-                Err(e) => return Err(e),
             }
         }
     }
@@ -88,17 +87,19 @@ impl ThreadContext {
         total_msg: usize,
         encode: &mut impl FnMut(&mut [u8]) -> R,
     ) -> Result<R, PushError> {
+        if self.mode == QueueMode::BoundedDropping {
+            return self.producer.push_encoded(total_msg, encode);
+        }
         loop {
             match self.producer.push_encoded(total_msg, encode) {
                 Ok(r) => return Ok(r),
-                Err(PushError::Full) if self.mode == QueueMode::UnboundedBlocking => {
+                Err(PushError::Full) => {
                     if let Some(new_cons) = self.producer.grow() {
                         CONSUMER_REGISTRY.lock().push(new_cons);
                     } else {
                         return Err(PushError::Full);
                     }
                 }
-                Err(e) => return Err(e),
             }
         }
     }
@@ -138,61 +139,32 @@ pub(crate) static TEST_SERIAL: parking_lot::Mutex<()> = parking_lot::Mutex::new(
 
 #[cfg(test)]
 fn reset_ctx() {
-    CTX_PTR.with(|cell| {
-        let ptr = cell.get();
-        if ptr != 0 {
-            CTX_HOLDER.with(|holder| {
-                *holder.borrow_mut() = None;
-            });
-        }
-        cell.set(0);
+    CTX.with(|ctx| unsafe {
+        std::ptr::drop_in_place(ctx.get());
+        std::ptr::write(ctx.get(), ThreadContext::new());
     });
-}
-
-fn ensure_ctx_default() -> *mut ThreadContext {
-    CTX_PTR.with(|cell| {
-        let mut ptr = cell.get();
-        if ptr == 0 {
-            CTX_HOLDER.with(|holder| {
-                let ctx = Box::new(ThreadContext::with_mode(
-                    QueueMode::BoundedDropping,
-                    queue::DEFAULT_QUEUE_CAPACITY,
-                ));
-                ptr = Box::into_raw(ctx) as usize;
-                cell.set(ptr);
-                // SAFETY: ptr came from Box::into_raw on the same allocation
-                // one line above. Re-boxing for TLS destructor cleanup.
-                let cleanup = unsafe { Box::from_raw(ptr as *mut ThreadContext) };
-                *holder.borrow_mut() = Some(cleanup);
-            });
-        }
-        ptr as *mut ThreadContext
-    })
+    let _ = ThreadContext::poll_all_registered_queues();
 }
 
 fn set_or_create_ctx_with_mode(mode: QueueMode, start_capacity: usize) -> *mut ThreadContext {
-    CTX_PTR.with(|cell| {
-        let mut ptr = cell.get();
-        if ptr == 0 {
-            CTX_HOLDER.with(|holder| {
-                let ctx = Box::new(ThreadContext::with_mode(mode, start_capacity));
-                ptr = Box::into_raw(ctx) as usize;
-                cell.set(ptr);
-                let cleanup = unsafe { Box::from_raw(ptr as *mut ThreadContext) };
-                *holder.borrow_mut() = Some(cleanup);
-            });
-        } else {
-            // SAFETY: ptr was allocated by Box::into_raw and is still alive
-            // (single-thread ownership via TLS, pointer != 0 checked above).
-            unsafe { &mut *(ptr as *mut ThreadContext) }.mode = mode;
+    CTX.with(|ctx| {
+        let ptr = ctx.get();
+        unsafe {
+            let current = &*ptr;
+            if current.producer.capacity() != start_capacity {
+                std::ptr::drop_in_place(ptr);
+                std::ptr::write(ptr, ThreadContext::with_mode(mode, start_capacity));
+            } else {
+                (&mut *ptr).mode = mode;
+            }
         }
-        ptr as *mut ThreadContext
+        ptr
     })
 }
 
 #[inline]
 fn get_ctx() -> *mut ThreadContext {
-    ensure_ctx_default()
+    CTX.with(|ctx| ctx.get())
 }
 
 #[cfg(test)]
@@ -361,6 +333,7 @@ mod tests {
         CONSUMER_REGISTRY.lock().clear();
         reset_ctx();
         ThreadContext::init_with_mode(QueueMode::UnboundedBlocking, 64);
+        let _ = ThreadContext::poll_all_registered_queues();
 
         // Initial registry has 1 consumer
         assert_eq!(CONSUMER_REGISTRY.lock().len(), 1);

@@ -5,7 +5,7 @@
 - Sink trait uses `Send + Sync` bounds for thread-safe dispatch from backend.
 - Logger and sinks use `Arc<dyn Sink>` for shared ownership.
 - Thread-local producer uses `UnsafeCell` (not `RefCell`) — safe because single-thread + non-reentrant.
-- const TLS (Cell<usize> with const init) triggers local-exec TLS model — no lazy-init branch, compiler emits `mov reg, fs:[offset]`.
+- **Eager `UnsafeCell<ThreadContext>` beats lazy `Cell<usize>` + `Box`:** the lazy model adds a null-check branch and redundant TLS slot access on every push (~1ns). Eager init in `thread_local! { static CTX: UnsafeCell<ThreadContext> = UnsafeCell::new(ThreadContext::new()); }` eliminates the branch entirely. Mode/capacity changes use `drop_in_place` + `ptr::write` (explicit drop required — `ptr::write` alone leaks the old producer without abandoning its consumer).
 - Compile-time feature dispatch (`#[cfg(feature = "...")]` on fn definitions) preferred over runtime atomics for timestamp/level selection.
 - Box::into_raw + Box::from_raw roundtrip avoids Stacked Borrows issues when storing raw pointers alongside ownership.
 - Global CONSUMER_REGISTRY requires per-test serialization mutex (TEST_SERIAL) for parallel test execution.
@@ -308,3 +308,37 @@ Replaced the rkyv-based serialization with a self-describing recursive schema by
 - JSON sinks (type system still in design)
 - Compression in RotatingFileSink (MVP)
 - `UnboundedDropping` and `BoundedBlocking` queue modes (complex, low payoff for MVP)
+
+---
+
+## [2026-05-05] — Perf: Revert TLS to eager UnsafeCell, merge macro sizing passes, de-loop bounded push
+
+### What was done
+- **Replaced `Cell<usize>` + lazy `ensure_ctx_default` with eager `UnsafeCell<ThreadContext>`** — eliminates null-check branch and extra TLS slot access on every push. Dropped 1-integer from 5.09 ns → 4.10 ns (-20%).
+- **Merged 3 sizing passes → 1 in `log_impl!` macro** — single reference per arg instead of 3 separate `schema_len`/`max_encoded_size`/arg-count calls. Dropped 1-integer from 5.74 ns → 5.09 ns (-11%).
+- **Removed loop/match dispatch from `push_impl`/`push_encoded_inner` for BoundedDropping mode** — fast path now calls `producer.push_encoded()` directly when mode is bounded.
+- **Added `#[inline]` to `schema_len` and `ensure_ctx_default`** — ensures constant-folding and inlining of trivial generic functions.
+- **Added `HashMap<String, String>` benchmark** — uses `DebugArg` wrapper, ~4.54 ns.
+- **Fixed `drop_in_place` bug:** `ptr::write` would leak old producers without marking consumers abandoned, accumulating stale consumers in the registry. Mode/capacity changes now explicitly `drop_in_place` before `ptr::write`.
+
+### Files changed
+- `src/thread_context.rs` — TLS model revert, drop_in_place fix, de-looped push path, `#[inline]` on get_ctx, test drain added to `grow_pushes_consumer_to_registry`
+- `src/macros.rs` — merged 3 sizing passes into 1
+- `src/arg.rs` — `#[inline]` on `schema_len`
+- `benches/logging.rs` — added `bench_one_hashmap_string`
+- `progress.txt` — updated Codebase Patterns, appended this entry
+
+### Benchmark results (final)
+| Benchmark | Before (Phase 3) | After | Improvement |
+|---|---|---|---|
+| 1 integer | 5.74 ns | **4.10 ns** | -29% |
+| 2 floats | 6.43 ns | **4.37 ns** | -32% |
+| 3 strings | 8.70 ns | **5.10 ns** | -41% |
+| 1 Vec\<String\> | 5.95 ns | **4.48 ns** | -25% |
+| 1 HashMap\<S,S\> | (new) | **4.54 ns** | — |
+
+### Learnings
+- **Lazy `Cell<usize>` + null-check per push is measurably slower than eager `UnsafeCell<T>`** — the "const TLS local-exec" model doesn't compensate for the branch overhead on every access. The original Phase 2.7 eager model was correct.
+- **`ptr::write` does NOT drop the old value** — must call `drop_in_place` first when replacing live objects in UnsafeCell-managed memory. Failure to do so silently leaks producers and orphans consumers in the registry.
+- **Loop/match guards for single-mode operations add measurable overhead** — branching on `QueueMode` once before the loop eliminates the loop entirely for the common BoundedDropping case.
+- **Separate sizing passes multiply reference-taking overhead** — merging arg-count + schema-size + payload-size into a single `$()*` block reduces the number of times each arg is borrowed.

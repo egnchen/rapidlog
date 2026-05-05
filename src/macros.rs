@@ -15,9 +15,18 @@ macro_rules! log_impl {
             // the duration of this expression. The Logger is not deallocated
             // while this call is active.
             if unsafe { ($crate::logger::Logger::log_level(&*std::sync::Arc::as_ptr(&($logger)))) }.as_usize() <= $level.as_usize() {
-                let _arg_count: usize = 0 $(+ { let _ = &$arg; 1 })*;
-                let _schemas_size: usize = 0 $(+ $crate::arg::schema_len(&$arg))*;
-                let _payloads_size: usize = 0 $(+ $crate::arg::Encode::max_encoded_size(&$arg))*;
+                let (_arg_count, _schemas_size, _payloads_size) = {
+                    let mut _c: usize = 0;
+                    let mut _s: usize = 0;
+                    let mut _p: usize = 0;
+                    $({
+                        let _a = &$arg;
+                        _c += 1;
+                        _s += $crate::arg::schema_len(_a);
+                        _p += $crate::arg::Encode::max_encoded_size(_a);
+                    })*
+                    (_c, _s, _p)
+                };
                 let _total_args = 1 + _schemas_size + _payloads_size;
                 let _total_msg = $crate::message::HEADER_SIZE + _total_args;
 
