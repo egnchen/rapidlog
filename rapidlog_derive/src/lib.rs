@@ -107,7 +107,7 @@ fn struct_max_size_body_named(fields: &syn::FieldsNamed) -> proc_macro2::TokenSt
     for field in &fields.named {
         let field_name = field.ident.as_ref().unwrap();
         size_stmts.push(quote! {
-            + ::rapidlog::arg::Encode::max_encoded_size(&self.#field_name)
+            + ::rapidlog::arg::Encode::encoded_size(&self.#field_name)
         });
     }
     quote! { 0usize #(#size_stmts)* }
@@ -120,7 +120,7 @@ fn struct_max_size_body_unnamed(fields: &syn::FieldsUnnamed) -> proc_macro2::Tok
     let mut size_stmts = Vec::new();
     for fname in &field_names {
         size_stmts.push(quote! {
-            + ::rapidlog::arg::Encode::max_encoded_size(#fname)
+            + ::rapidlog::arg::Encode::encoded_size(#fname)
         });
     }
     quote! { 0usize #(#size_stmts)* }
@@ -229,7 +229,7 @@ fn variant_max_size_body(variant: &Variant, disc_size: usize) -> proc_macro2::To
                 .map(|i| format_ident!("__f{}", i))
                 .collect();
             let sum: Vec<_> = field_names.iter().map(|name| {
-                quote! { + ::rapidlog::arg::Encode::max_encoded_size(#name) }
+                quote! { + ::rapidlog::arg::Encode::encoded_size(#name) }
             }).collect();
             quote! {
                 Self::#variant_name(#(#field_names),*) => {
@@ -242,7 +242,7 @@ fn variant_max_size_body(variant: &Variant, disc_size: usize) -> proc_macro2::To
                 .map(|field| field.ident.as_ref().unwrap())
                 .collect();
             let sum: Vec<_> = field_names.iter().map(|name| {
-                quote! { + ::rapidlog::arg::Encode::max_encoded_size(#name) }
+                quote! { + ::rapidlog::arg::Encode::encoded_size(#name) }
             }).collect();
             quote! {
                 Self::#variant_name { #(#field_names),* } => {
@@ -352,7 +352,7 @@ pub fn derive_encode(input: TokenStream) -> TokenStream {
                 #encode_body
             }
 
-            fn max_encoded_size(&self) -> usize {
+            fn encoded_size(&self) -> usize {
                 #max_size_body
             }
 

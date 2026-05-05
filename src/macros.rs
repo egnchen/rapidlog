@@ -60,7 +60,7 @@ macro_rules! log_impl {
                     let mut _p: usize = 0;
                     $({
                         let _a = &$arg;
-                        _p += $crate::arg::Encode::max_encoded_size(_a);
+                        _p += $crate::arg::Encode::encoded_size(_a);
                     })*
                     _p
                 };
