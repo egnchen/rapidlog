@@ -108,6 +108,7 @@ impl SpscProducer {
         Ok(())
     }
 
+    #[inline(always)]
     pub fn push_encoded<R>(
         &mut self,
         total_msg: usize,

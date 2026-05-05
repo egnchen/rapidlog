@@ -2,35 +2,32 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{punctuated::Punctuated, token::Comma, Data, DeriveInput, Fields, Variant};
 
-fn field_schema_byte(ty: &syn::Type) -> proc_macro2::TokenStream {
+fn schema_of(ty: &syn::Type) -> proc_macro2::TokenStream {
     quote! {
-        {
-            const _: () = assert!(
-                <#ty as ::rapidlog::arg::Encode>::SCHEMA.len() == 1,
-                "field schemas with >1 byte not yet supported in derive(Encode)"
-            );
-            <#ty as ::rapidlog::arg::Encode>::SCHEMA[0]
-        }
+        <#ty as ::rapidlog::arg::SchemaOf>::schema_of()
     }
 }
 
-fn variant_schema_byte(ty: &syn::Type) -> proc_macro2::TokenStream {
-    quote! {
-        {
-            const _: () = assert!(
-                <#ty as ::rapidlog::arg::Encode>::SCHEMA.len() == 1,
-                "variant schemas with >1 byte not yet supported in derive(Encode)"
-            );
-            <#ty as ::rapidlog::arg::Encode>::SCHEMA[0]
-        }
-    }
-}
-
-fn struct_schema(fields: &syn::FieldsNamed, string_table: &mut Vec<u8>) -> proc_macro2::TokenStream {
+fn struct_schema_named(
+    fields: &syn::FieldsNamed,
+    string_table: &mut Vec<u8>,
+) -> proc_macro2::TokenStream {
     let field_count = fields.named.len();
     let st_idx: u8 = 0;
+    let mut stmts: Vec<proc_macro2::TokenStream> = Vec::new();
 
-    let mut field_schema_tokens = Vec::new();
+    if field_count <= 15 {
+        stmts.push(quote! { __v.push(0xA0u8 | #field_count as u8); });
+        stmts.push(quote! { __v.push(#st_idx); });
+    } else {
+        let count_lo = (field_count & 0xFF) as u8;
+        let count_hi = ((field_count >> 8) & 0xFF) as u8;
+        stmts.push(quote! { __v.push(0xA0u8); });
+        stmts.push(quote! { __v.push(#count_lo); });
+        stmts.push(quote! { __v.push(#count_hi); });
+        stmts.push(quote! { __v.push(#st_idx); });
+    }
+
     for field in &fields.named {
         let field_name = field.ident.as_ref().unwrap().to_string();
         let st_off = string_table.len() as u16;
@@ -39,38 +36,41 @@ fn struct_schema(fields: &syn::FieldsNamed, string_table: &mut Vec<u8>) -> proc_
 
         let st_off_lo = (st_off & 0xFF) as u8;
         let st_off_hi = (st_off >> 8) as u8;
-        let schema_byte = field_schema_byte(&field.ty);
+        let field_schema = schema_of(&field.ty);
 
-        field_schema_tokens.push(quote! {
-            #st_off_lo, #st_off_hi,
-            #schema_byte,
-        });
+        stmts.push(quote! { __v.push(#st_off_lo); });
+        stmts.push(quote! { __v.push(#st_off_hi); });
+        stmts.push(quote! { __v.extend_from_slice(#field_schema); });
     }
 
-    let count_lo = (field_count & 0xFF) as u8;
-    let count_hi = ((field_count >> 8) & 0xFF) as u8;
-
-    if field_count <= 15 {
-        quote! {
-            &[
-                0xA0u8 | #field_count as u8,
-                #st_idx,
-                #(#field_schema_tokens)*
-            ]
-        }
-    } else {
-        quote! {
-            &[
-                0xA0u8,
-                #count_lo, #count_hi,
-                #st_idx,
-                #(#field_schema_tokens)*
-            ]
-        }
-    }
+    quote! { #(#stmts)* }
 }
 
-fn struct_encode_body(fields: &syn::FieldsNamed) -> proc_macro2::TokenStream {
+fn struct_schema_unnamed(
+    fields: &syn::FieldsUnnamed,
+) -> proc_macro2::TokenStream {
+    let field_count = fields.unnamed.len();
+    let mut stmts: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    if field_count <= 15 {
+        stmts.push(quote! { __v.push(0x90u8 | #field_count as u8); });
+    } else {
+        let count_lo = (field_count & 0xFF) as u8;
+        let count_hi = ((field_count >> 8) & 0xFF) as u8;
+        stmts.push(quote! { __v.push(0x90u8); });
+        stmts.push(quote! { __v.push(#count_lo); });
+        stmts.push(quote! { __v.push(#count_hi); });
+    }
+
+    for field in &fields.unnamed {
+        let field_schema = schema_of(&field.ty);
+        stmts.push(quote! { __v.extend_from_slice(#field_schema); });
+    }
+
+    quote! { #(#stmts)* }
+}
+
+fn struct_encode_body_named(fields: &syn::FieldsNamed) -> proc_macro2::TokenStream {
     let mut encode_stmts = Vec::new();
     for field in &fields.named {
         let field_name = field.ident.as_ref().unwrap();
@@ -85,7 +85,24 @@ fn struct_encode_body(fields: &syn::FieldsNamed) -> proc_macro2::TokenStream {
     }
 }
 
-fn struct_max_size_body(fields: &syn::FieldsNamed) -> proc_macro2::TokenStream {
+fn struct_encode_body_unnamed(fields: &syn::FieldsUnnamed) -> proc_macro2::TokenStream {
+    let field_names: Vec<_> = (0..fields.unnamed.len())
+        .map(|i| format_ident!("f{}", i))
+        .collect();
+    let mut encode_stmts = Vec::new();
+    for fname in &field_names {
+        encode_stmts.push(quote! {
+            pos += ::rapidlog::arg::Encode::encode_to(#fname, &mut buf[pos..]);
+        });
+    }
+    quote! {
+        let mut pos = 0usize;
+        #(#encode_stmts)*
+        pos
+    }
+}
+
+fn struct_max_size_body_named(fields: &syn::FieldsNamed) -> proc_macro2::TokenStream {
     let mut size_stmts = Vec::new();
     for field in &fields.named {
         let field_name = field.ident.as_ref().unwrap();
@@ -93,8 +110,146 @@ fn struct_max_size_body(fields: &syn::FieldsNamed) -> proc_macro2::TokenStream {
             + ::rapidlog::arg::Encode::max_encoded_size(&self.#field_name)
         });
     }
-    quote! {
-        0usize #(#size_stmts)*
+    quote! { 0usize #(#size_stmts)* }
+}
+
+fn struct_max_size_body_unnamed(fields: &syn::FieldsUnnamed) -> proc_macro2::TokenStream {
+    let field_names: Vec<_> = (0..fields.unnamed.len())
+        .map(|i| format_ident!("f{}", i))
+        .collect();
+    let mut size_stmts = Vec::new();
+    for fname in &field_names {
+        size_stmts.push(quote! {
+            + ::rapidlog::arg::Encode::max_encoded_size(#fname)
+        });
+    }
+    quote! { 0usize #(#size_stmts)* }
+}
+
+fn variant_sub_schema(
+    fields: &Fields,
+    variant_string_table: &mut Vec<u8>,
+) -> proc_macro2::TokenStream {
+    match fields {
+        Fields::Unit => {
+            quote! { __v.push(0x00u8); }
+        }
+        Fields::Unnamed(f) if f.unnamed.len() == 1 => {
+            let field_schema = schema_of(&f.unnamed.first().unwrap().ty);
+            quote! { __v.extend_from_slice(#field_schema); }
+        }
+        Fields::Unnamed(f) => {
+            struct_schema_unnamed(f)
+        }
+        Fields::Named(f) => {
+            struct_schema_named(f, variant_string_table)
+        }
+    }
+}
+
+fn variant_encode_body(
+    variant: &Variant,
+    idx: usize,
+    uses_u16: bool,
+) -> proc_macro2::TokenStream {
+    let variant_name = &variant.ident;
+    let (encode_disc, disc_size) = if uses_u16 {
+        let lo = (idx & 0xFF) as u8;
+        let hi = (idx >> 8) as u8;
+        (
+            quote! { buf[0] = #lo; buf[1] = #hi; },
+            2usize,
+        )
+    } else {
+        let vdx = idx as u8;
+        (quote! { buf[0] = #vdx; }, 1usize)
+    };
+
+    match &variant.fields {
+        Fields::Unit => {
+            quote! {
+                Self::#variant_name => {
+                    #encode_disc
+                    #disc_size
+                }
+            }
+        }
+        Fields::Unnamed(f) => {
+            let field_names: Vec<_> = (0..f.unnamed.len())
+                .map(|i| format_ident!("__f{}", i))
+                .collect();
+            let bindings = &field_names;
+            let enc_stmts: Vec<_> = bindings
+                .iter()
+                .map(|name| {
+                    quote! {
+                        pos += ::rapidlog::arg::Encode::encode_to(#name, &mut buf[pos..]);
+                    }
+                })
+                .collect();
+            quote! {
+                Self::#variant_name(#(#bindings),*) => {
+                    #encode_disc
+                    let mut pos = #disc_size;
+                    #(#enc_stmts)*
+                    pos
+                }
+            }
+        }
+        Fields::Named(f) => {
+            let field_names: Vec<_> = f.named.iter()
+                .map(|field| field.ident.as_ref().unwrap())
+                .collect();
+            let bindings = &field_names;
+            let enc_stmts: Vec<_> = bindings.iter().map(|name| {
+                quote! {
+                    pos += ::rapidlog::arg::Encode::encode_to(#name, &mut buf[pos..]);
+                }
+            }).collect();
+            quote! {
+                Self::#variant_name { #(#bindings),* } => {
+                    #encode_disc
+                    let mut pos = #disc_size;
+                    #(#enc_stmts)*
+                    pos
+                }
+            }
+        }
+    }
+}
+
+fn variant_max_size_body(variant: &Variant, disc_size: usize) -> proc_macro2::TokenStream {
+    let variant_name = &variant.ident;
+    match &variant.fields {
+        Fields::Unit => {
+            quote! { Self::#variant_name => #disc_size }
+        }
+        Fields::Unnamed(f) => {
+            let field_names: Vec<_> = (0..f.unnamed.len())
+                .map(|i| format_ident!("__f{}", i))
+                .collect();
+            let sum: Vec<_> = field_names.iter().map(|name| {
+                quote! { + ::rapidlog::arg::Encode::max_encoded_size(#name) }
+            }).collect();
+            quote! {
+                Self::#variant_name(#(#field_names),*) => {
+                    #disc_size #(#sum)*
+                }
+            }
+        }
+        Fields::Named(f) => {
+            let field_names: Vec<_> = f.named.iter()
+                .map(|field| field.ident.as_ref().unwrap())
+                .collect();
+            let sum: Vec<_> = field_names.iter().map(|name| {
+                quote! { + ::rapidlog::arg::Encode::max_encoded_size(#name) }
+            }).collect();
+            quote! {
+                Self::#variant_name { #(#field_names),* } => {
+                    #disc_size #(#sum)*
+                }
+            }
+        }
     }
 }
 
@@ -105,8 +260,22 @@ fn enum_schema(
     let variant_count = variants.len();
     let st_idx: u8 = 0;
     let vdx_k: u8 = if variant_count <= 255 { 1 } else { 2 };
+    let mut stmts: Vec<proc_macro2::TokenStream> = Vec::new();
 
-    let mut var_schema_tokens = Vec::new();
+    if variant_count <= 15 {
+        stmts.push(quote! { __v.push(0xB0u8 | #variant_count as u8); });
+        stmts.push(quote! { __v.push(#vdx_k); });
+        stmts.push(quote! { __v.push(#st_idx); });
+    } else {
+        let count_lo = (variant_count & 0xFF) as u8;
+        let count_hi = ((variant_count >> 8) & 0xFF) as u8;
+        stmts.push(quote! { __v.push(0xB0u8); });
+        stmts.push(quote! { __v.push(#count_lo); });
+        stmts.push(quote! { __v.push(#count_hi); });
+        stmts.push(quote! { __v.push(#vdx_k); });
+        stmts.push(quote! { __v.push(#st_idx); });
+    }
+
     for variant in variants {
         let variant_name = variant.ident.to_string();
         let st_off = string_table.len() as u16;
@@ -115,151 +284,14 @@ fn enum_schema(
 
         let st_off_lo = (st_off & 0xFF) as u8;
         let st_off_hi = (st_off >> 8) as u8;
+        let sub_schema = variant_sub_schema(&variant.fields, string_table);
 
-        match &variant.fields {
-            Fields::Unit => {
-                var_schema_tokens.push(quote! {
-                    #st_off_lo, #st_off_hi, 0x00u8,
-                });
-            }
-            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-                let schema_byte = variant_schema_byte(&fields.unnamed.first().unwrap().ty);
-                var_schema_tokens.push(quote! {
-                    #st_off_lo, #st_off_hi,
-                    #schema_byte,
-                });
-            }
-            _ => {
-                var_schema_tokens.push(quote! {
-                    #st_off_lo, #st_off_hi, 0x00u8,
-                });
-            }
-        }
+        stmts.push(quote! { __v.push(#st_off_lo); });
+        stmts.push(quote! { __v.push(#st_off_hi); });
+        stmts.push(sub_schema);
     }
 
-    let count_lo = (variant_count & 0xFF) as u8;
-    let count_hi = ((variant_count >> 8) & 0xFF) as u8;
-
-    if variant_count <= 15 {
-        quote! {
-            &[
-                0xB0u8 | #variant_count as u8,
-                #vdx_k, #st_idx,
-                #(#var_schema_tokens)*
-            ]
-        }
-    } else {
-        quote! {
-            &[
-                0xB0u8,
-                #count_lo, #count_hi,
-                #vdx_k, #st_idx,
-                #(#var_schema_tokens)*
-            ]
-        }
-    }
-}
-
-fn enum_encode_body(variants: &Punctuated<Variant, Comma>) -> proc_macro2::TokenStream {
-    let variant_count = variants.len();
-    let uses_u16_discriminant = variant_count > 255;
-
-    let mut arms = Vec::new();
-    for (idx, variant) in variants.iter().enumerate() {
-        let variant_name = &variant.ident;
-
-        let (encode_discriminant, discriminant_size) = if uses_u16_discriminant {
-            let lo = (idx & 0xFF) as u8;
-            let hi = (idx >> 8) as u8;
-            (
-                quote! {
-                    buf[0] = #lo;
-                    buf[1] = #hi;
-                },
-                2usize,
-            )
-        } else {
-            let vdx_byte = idx as u8;
-            (
-                quote! {
-                    buf[0] = #vdx_byte;
-                },
-                1usize,
-            )
-        };
-
-        match &variant.fields {
-            Fields::Unit => {
-                arms.push(quote! {
-                    Self::#variant_name => {
-                        #encode_discriminant
-                        #discriminant_size
-                    }
-                });
-            }
-            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-                let field_names: Vec<_> = (0..fields.unnamed.len())
-                    .map(|i| format_ident!("f{}", i))
-                    .collect();
-                let f0 = &field_names[0];
-                arms.push(quote! {
-                    Self::#variant_name(#f0) => {
-                        #encode_discriminant
-                        let used = ::rapidlog::arg::Encode::encode_to(#f0, &mut buf[#discriminant_size..]);
-                        #discriminant_size + used
-                    }
-                });
-            }
-            _ => {
-                arms.push(quote! {
-                    Self::#variant_name { .. } => {
-                        #encode_discriminant
-                        #discriminant_size
-                    }
-                });
-            }
-        }
-    }
-    quote! {
-        match self {
-            #(#arms)*
-        }
-    }
-}
-
-fn enum_max_size_body(variants: &Punctuated<Variant, Comma>) -> proc_macro2::TokenStream {
-    let variant_count = variants.len();
-    let discriminant_size: usize = if variant_count > 255 { 2 } else { 1 };
-
-    let mut arms = Vec::new();
-    for variant in variants {
-        let variant_name = &variant.ident;
-        match &variant.fields {
-            Fields::Unit => {
-                arms.push(quote! {
-                    Self::#variant_name => #discriminant_size
-                });
-            }
-            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-                let f0 = format_ident!("f0");
-                arms.push(quote! {
-                    Self::#variant_name(#f0) => {
-                        #discriminant_size + ::rapidlog::arg::Encode::max_encoded_size(#f0)
-                    }
-                });
-            }
-            _ => {
-                arms.push(quote! {
-                    Self::#variant_name { .. } => #discriminant_size
-                });
-            }
-        }
-    }
-    quote! {
-        match self {
-            #(#arms)*
-        }
-    }
+    quote! { #(#stmts)* }
 }
 
 #[proc_macro_derive(Encode)]
@@ -269,17 +301,22 @@ pub fn derive_encode(input: TokenStream) -> TokenStream {
 
     let mut string_table = Vec::new();
 
-    let (schema_tokens, encode_body, max_size_body) = match &input.data {
+    let (schema_body, encode_body, max_size_body) = match &input.data {
         Data::Struct(data) => match &data.fields {
             Fields::Named(fields) => (
-                struct_schema(fields, &mut string_table),
-                struct_encode_body(fields),
-                struct_max_size_body(fields),
+                struct_schema_named(fields, &mut string_table),
+                struct_encode_body_named(fields),
+                struct_max_size_body_named(fields),
             ),
-            _ => {
+            Fields::Unnamed(fields) => (
+                struct_schema_unnamed(fields),
+                struct_encode_body_unnamed(fields),
+                struct_max_size_body_unnamed(fields),
+            ),
+            Fields::Unit => {
                 return syn::Error::new_spanned(
                     &input,
-                    "Encode derive only supports named fields for structs",
+                    "Encode derive does not support unit structs",
                 )
                 .to_compile_error()
                 .into();
@@ -301,7 +338,15 @@ pub fn derive_encode(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         impl ::rapidlog::arg::Encode for #name {
-            const SCHEMA: &'static [u8] = #schema_tokens;
+            fn schema() -> &'static [u8] {
+                use std::sync::OnceLock;
+                static SCHEMA: OnceLock<Vec<u8>> = OnceLock::new();
+                SCHEMA.get_or_init(|| {
+                    let mut __v = Vec::new();
+                    #schema_body
+                    __v
+                }).as_slice()
+            }
 
             fn encode_to(&self, buf: &mut [u8]) -> usize {
                 #encode_body
@@ -309,6 +354,10 @@ pub fn derive_encode(input: TokenStream) -> TokenStream {
 
             fn max_encoded_size(&self) -> usize {
                 #max_size_body
+            }
+
+            fn string_table(&self) -> &'static [u8] {
+                <Self as ::rapidlog::arg::HasStringTable>::STRING_TABLE
             }
         }
 
@@ -318,4 +367,25 @@ pub fn derive_encode(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+fn enum_encode_body(variants: &Punctuated<Variant, Comma>) -> proc_macro2::TokenStream {
+    let variant_count = variants.len();
+    let uses_u16 = variant_count > 255;
+    let arms: Vec<_> = variants
+        .iter()
+        .enumerate()
+        .map(|(idx, v)| variant_encode_body(v, idx, uses_u16))
+        .collect();
+    quote! { match self { #(#arms)* } }
+}
+
+fn enum_max_size_body(variants: &Punctuated<Variant, Comma>) -> proc_macro2::TokenStream {
+    let variant_count = variants.len();
+    let disc_size: usize = if variant_count > 255 { 2 } else { 1 };
+    let arms: Vec<_> = variants
+        .iter()
+        .map(|v| variant_max_size_body(v, disc_size))
+        .collect();
+    quote! { match self { #(#arms)* } }
 }

@@ -15,6 +15,7 @@ pub const HEADER_SIZE: usize = std::mem::size_of::<ArchivedHeader>();
 const _: () = assert!(HEADER_SIZE == 32);
 
 impl ArchivedHeader {
+    #[inline]
     pub fn new(timestamp_ns: u64, metadata: &'static Metadata, logger: *const Logger) -> Self {
         Self {
             timestamp_ns,
@@ -24,6 +25,7 @@ impl ArchivedHeader {
         }
     }
 
+    #[inline]
     pub fn serialize_into(&self, buf: &mut [u8]) {
         buf[0..8].copy_from_slice(&self.timestamp_ns.to_ne_bytes());
         buf[8..16].copy_from_slice(&self.metadata_ptr.to_ne_bytes());
@@ -60,6 +62,10 @@ mod tests {
     use super::*;
     use crate::level::LogLevel;
 
+    fn empty_schemas() -> &'static [u8] {
+        &[]
+    }
+
     fn test_metadata() -> &'static Metadata {
         Box::leak(Box::new(Metadata::new(
             LogLevel::Info,
@@ -67,6 +73,9 @@ mod tests {
             "test.rs",
             42,
             "test",
+            empty_schemas,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
         )))
     }
 

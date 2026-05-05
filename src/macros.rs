@@ -3,53 +3,81 @@
 macro_rules! log_impl {
     ($level:expr, $logger:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {
         {
+            use std::sync::OnceLock;
+            static _SCHEMA_BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+            static _STRING_TABLES: OnceLock<Box<[&'static [u8]]>> = OnceLock::new();
+
+            fn __schemas() -> &'static [u8] {
+                _SCHEMA_BYTES.get().map(|v| v.as_slice()).unwrap_or(&[])
+            }
+
+            fn __string_tables() -> &'static [&'static [u8]] {
+                _STRING_TABLES.get().map(|b| b.as_ref()).unwrap_or(&[])
+            }
+
+            fn __user_formatters() -> &'static [$crate::arg::UserFormatter] {
+                &[]
+            }
+
             const _META: &$crate::metadata::Metadata = &$crate::metadata::Metadata::new(
                 $level,
                 $fmt,
                 file!(),
                 line!(),
                 module_path!(),
+                __schemas,
+                __string_tables,
+                __user_formatters,
             );
             #[allow(unused_unsafe)]
-            // SAFETY: as_ptr returns a valid pointer from an Arc that lives for
-            // the duration of this expression. The Logger is not deallocated
-            // while this call is active.
             if unsafe { ($crate::logger::Logger::log_level(&*std::sync::Arc::as_ptr(&($logger)))) }.as_usize() <= $level.as_usize() {
-                let (_arg_count, _schemas_size, _payloads_size) = {
-                    let mut _c: usize = 0;
-                    let mut _s: usize = 0;
+                // Lazy-init schemas once per call site (only when logging passes level check).
+                if _SCHEMA_BYTES.get().is_none() {
+                    let _ = _SCHEMA_BYTES.set({
+                        let mut v = Vec::new();
+                        {
+                            let mut _c: u8 = 0;
+                            $({
+                                let _a = &$arg;
+                                _c += 1;
+                            })*
+                            v.push(_c);
+                        }
+                        $(v.extend_from_slice($crate::arg::schema_of(&$arg));)*
+                        v
+                    });
+                }
+                if _STRING_TABLES.get().is_none() {
+                    let _ = _STRING_TABLES.set({
+                        #[allow(unused_mut)]
+                        let mut tables: Vec<&'static [u8]> = Vec::new();
+                        $(tables.push($crate::arg::Encode::string_table(&$arg));)*
+                        tables.into_boxed_slice()
+                    });
+                }
+
+                let _payloads_size: usize = {
                     let mut _p: usize = 0;
                     $({
                         let _a = &$arg;
-                        _c += 1;
-                        _s += $crate::arg::schema_len(_a);
                         _p += $crate::arg::Encode::max_encoded_size(_a);
                     })*
-                    (_c, _s, _p)
+                    _p
                 };
-                let _total_args = 1 + _schemas_size + _payloads_size;
-                let _total_msg = $crate::message::HEADER_SIZE + _total_args;
+                let _total_msg = $crate::message::HEADER_SIZE + _payloads_size;
 
                 $crate::thread_context::ThreadContext::push_encoded(_total_msg, |__buf: &mut [u8]| {
-                    let __p = __buf.as_mut_ptr();
-                    unsafe {
-                        (__p.add(8) as *mut u64).write_unaligned(
-                            _META as *const $crate::metadata::Metadata as u64);
-                        (__p.add(16) as *mut u64).write_unaligned(
-                            std::sync::Arc::as_ptr(&($logger)) as *const $crate::logger::Logger as u64);
-                        (__p.add(24) as *mut u64).write_unaligned(0u64);
-                    }
-                    __buf[$crate::message::HEADER_SIZE] = _arg_count as u8;
-                    let mut __sp = $crate::message::HEADER_SIZE + 1;
-                    let mut __dp = $crate::message::HEADER_SIZE + 1 + _schemas_size;
+                    $crate::message::ArchivedHeader::new(
+                        $crate::timestamp::now(),
+                        _META,
+                        std::sync::Arc::as_ptr(&($logger)),
+                    )
+                    .serialize_into(&mut __buf[..$crate::message::HEADER_SIZE]);
+                    let mut __dp = $crate::message::HEADER_SIZE;
                     $({
-                        let __s = $crate::arg::schema_of(&$arg);
-                        __buf[__sp..__sp + __s.len()].copy_from_slice(__s);
-                        __sp += __s.len();
                         let __w = $crate::arg::Encode::encode_to(&$arg, &mut __buf[__dp..]);
                         __dp += __w;
                     })*
-                    __buf[0..8].copy_from_slice(&($crate::timestamp::now()).to_ne_bytes());
                 }).ok();
             }
         }

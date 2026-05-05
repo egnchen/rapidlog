@@ -34,24 +34,55 @@ impl Filter for LevelFilter {
 mod tests {
     use super::*;
 
+    fn empty_schemas() -> &'static [u8] {
+        &[]
+    }
+
     #[test]
     fn level_filter_accepts_same() {
         let filter = LevelFilter::new(LogLevel::Warning);
-        let meta = Metadata::new(LogLevel::Warning, "test", "f.rs", 1, "mod");
+        let meta = Metadata::new(
+            LogLevel::Warning,
+            "test",
+            "f.rs",
+            1,
+            "mod",
+            empty_schemas,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
+        );
         assert!(filter.accept(&meta, &[]));
     }
 
     #[test]
     fn level_filter_rejects_lower() {
         let filter = LevelFilter::new(LogLevel::Error);
-        let meta = Metadata::new(LogLevel::Warning, "test", "f.rs", 1, "mod");
+        let meta = Metadata::new(
+            LogLevel::Warning,
+            "test",
+            "f.rs",
+            1,
+            "mod",
+            empty_schemas,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
+        );
         assert!(!filter.accept(&meta, &[]));
     }
 
     #[test]
     fn level_filter_accepts_higher() {
         let filter = LevelFilter::new(LogLevel::Info);
-        let meta = Metadata::new(LogLevel::Critical, "test", "f.rs", 1, "mod");
+        let meta = Metadata::new(
+            LogLevel::Critical,
+            "test",
+            "f.rs",
+            1,
+            "mod",
+            empty_schemas,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
+        );
         assert!(filter.accept(&meta, &[]));
     }
 }

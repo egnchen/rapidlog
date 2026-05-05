@@ -95,26 +95,37 @@ fn read_signed_ne(buf: &[u8], k: u8) -> i64 {
 // ── Encode trait ───────────────────────────────────────────────────────────
 
 pub trait Encode {
-    const SCHEMA: &'static [u8];
+    fn schema() -> &'static [u8];
     fn encode_to(&self, buf: &mut [u8]) -> usize;
     fn max_encoded_size(&self) -> usize;
+    fn string_table(&self) -> &'static [u8] {
+        &[]
+    }
 }
 
-/// Const helper: returns the schema for any `Encode` implementor.
-/// Used by macros to get `SCHEMA` from an expression (not a type).
-pub const fn schema_of<T: Encode + ?Sized>(_: &T) -> &'static [u8] {
-    <T as Encode>::SCHEMA
+/// Returns the schema for any `Encode` implementor.
+/// Used by macros to get the schema from an expression (not a type).
+#[inline]
+pub fn schema_of<T: Encode + ?Sized>(_: &T) -> &'static [u8] {
+    T::schema()
 }
 
 /// Returns the schema length for an `Encode` implementor.
 /// Used by macros to compute total encoding size.
 #[inline]
 pub fn schema_len<T: Encode + ?Sized>(_: &T) -> usize {
-    T::SCHEMA.len()
+    T::schema().len()
 }
 
 pub trait HasStringTable {
     const STRING_TABLE: &'static [u8];
+}
+
+/// Helper: calls `HasStringTable::STRING_TABLE` for types implementing it.
+/// For types without `HasStringTable`, use `Encode::string_table` instead.
+#[inline]
+pub fn string_table_of<T: HasStringTable + ?Sized>(_: &T) -> &'static [u8] {
+    <T as HasStringTable>::STRING_TABLE
 }
 
 // ── UserFormatter ──────────────────────────────────────────────────────────
@@ -128,7 +139,10 @@ pub struct UserFormatter {
 macro_rules! impl_encode_signed_int {
     ($ty:ty, $k:expr) => {
         impl Encode for $ty {
-            const SCHEMA: &'static [u8] = &[op_signed_int($k)];
+            fn schema() -> &'static [u8] {
+                static S: &[u8] = &[op_signed_int($k)];
+                S
+            }
 
             fn encode_to(&self, buf: &mut [u8]) -> usize {
                 let size = size_for_k($k);
@@ -148,7 +162,10 @@ macro_rules! impl_encode_signed_int {
 macro_rules! impl_encode_unsigned_int {
     ($ty:ty, $k:expr) => {
         impl Encode for $ty {
-            const SCHEMA: &'static [u8] = &[op_unsigned_int($k)];
+            fn schema() -> &'static [u8] {
+                static S: &[u8] = &[op_unsigned_int($k)];
+                S
+            }
 
             fn encode_to(&self, buf: &mut [u8]) -> usize {
                 let size = size_for_k($k);
@@ -178,11 +195,15 @@ impl_encode_unsigned_int!(u64, 4);
 impl_encode_unsigned_int!(u128, 5);
 
 impl Encode for usize {
-    const SCHEMA: &'static [u8] = &[op_unsigned_int(if std::mem::size_of::<usize>() == 4 {
-        3
-    } else {
-        4
-    })];
+    fn schema() -> &'static [u8] {
+        static S3: &[u8] = &[op_unsigned_int(3)];
+        static S4: &[u8] = &[op_unsigned_int(4)];
+        if std::mem::size_of::<usize>() == 4 {
+            S3
+        } else {
+            S4
+        }
+    }
 
     fn encode_to(&self, buf: &mut [u8]) -> usize {
         (*self as u64).encode_to(buf)
@@ -194,7 +215,10 @@ impl Encode for usize {
 }
 
 impl Encode for f32 {
-    const SCHEMA: &'static [u8] = &[op_float(3)];
+    fn schema() -> &'static [u8] {
+        static S: &[u8] = &[op_float(3)];
+        S
+    }
 
     fn encode_to(&self, buf: &mut [u8]) -> usize {
         buf[..4].copy_from_slice(&self.to_ne_bytes());
@@ -207,7 +231,10 @@ impl Encode for f32 {
 }
 
 impl Encode for f64 {
-    const SCHEMA: &'static [u8] = &[op_float(4)];
+    fn schema() -> &'static [u8] {
+        static S: &[u8] = &[op_float(4)];
+        S
+    }
 
     fn encode_to(&self, buf: &mut [u8]) -> usize {
         buf[..8].copy_from_slice(&self.to_ne_bytes());
@@ -220,7 +247,10 @@ impl Encode for f64 {
 }
 
 impl Encode for bool {
-    const SCHEMA: &'static [u8] = &[op_bool()];
+    fn schema() -> &'static [u8] {
+        static S: &[u8] = &[op_bool()];
+        S
+    }
 
     fn encode_to(&self, buf: &mut [u8]) -> usize {
         buf[0] = *self as u8;
@@ -233,7 +263,10 @@ impl Encode for bool {
 }
 
 impl Encode for char {
-    const SCHEMA: &'static [u8] = &[op_char()];
+    fn schema() -> &'static [u8] {
+        static S: &[u8] = &[op_char()];
+        S
+    }
 
     fn encode_to(&self, buf: &mut [u8]) -> usize {
         buf[..4].copy_from_slice(&(*self as u32).to_ne_bytes());
@@ -246,7 +279,10 @@ impl Encode for char {
 }
 
 impl Encode for () {
-    const SCHEMA: &'static [u8] = &[OP_UNIT];
+    fn schema() -> &'static [u8] {
+        static S: &[u8] = &[OP_UNIT];
+        S
+    }
 
     fn encode_to(&self, _buf: &mut [u8]) -> usize {
         0
@@ -258,7 +294,10 @@ impl Encode for () {
 }
 
 impl Encode for &str {
-    const SCHEMA: &'static [u8] = &[op_str(2)];
+    fn schema() -> &'static [u8] {
+        static S: &[u8] = &[op_str(2)];
+        S
+    }
 
     fn encode_to(&self, buf: &mut [u8]) -> usize {
         let bytes = self.as_bytes();
@@ -275,7 +314,10 @@ impl Encode for &str {
 }
 
 impl Encode for String {
-    const SCHEMA: &'static [u8] = <&str as Encode>::SCHEMA;
+    fn schema() -> &'static [u8] {
+        static S: &[u8] = &[op_str(2)];
+        S
+    }
 
     fn encode_to(&self, buf: &mut [u8]) -> usize {
         self.as_str().encode_to(buf)
@@ -291,7 +333,10 @@ impl Encode for String {
 pub struct DisplayArg<T: fmt::Display>(pub T);
 
 impl<T: fmt::Display> Encode for DisplayArg<T> {
-    const SCHEMA: &'static [u8] = <&str as Encode>::SCHEMA;
+    fn schema() -> &'static [u8] {
+        static S: &[u8] = &[op_str(2)];
+        S
+    }
 
     fn encode_to(&self, buf: &mut [u8]) -> usize {
         self.0.to_string().as_str().encode_to(buf)
@@ -305,7 +350,10 @@ impl<T: fmt::Display> Encode for DisplayArg<T> {
 pub struct DebugArg<T: fmt::Debug>(pub T);
 
 impl<T: fmt::Debug> Encode for DebugArg<T> {
-    const SCHEMA: &'static [u8] = <&str as Encode>::SCHEMA;
+    fn schema() -> &'static [u8] {
+        static S: &[u8] = &[op_str(2)];
+        S
+    }
 
     fn encode_to(&self, buf: &mut [u8]) -> usize {
         format!("{:?}", self.0).as_str().encode_to(buf)
@@ -313,6 +361,350 @@ impl<T: fmt::Debug> Encode for DebugArg<T> {
 
     fn max_encoded_size(&self) -> usize {
         512
+    }
+}
+
+// ── Tuple Encode impls ──────────────────────────────────────────────────────
+
+/// Type witness trait: allows getting schema of a type without
+/// potential for the compiler to resolve to the calling function's impl.
+pub trait SchemaOf {
+    fn schema_of() -> &'static [u8];
+}
+
+impl<T: Encode> SchemaOf for T {
+    #[inline]
+    fn schema_of() -> &'static [u8] {
+        <T as Encode>::schema()
+    }
+}
+
+macro_rules! impl_tuple_encode_one {
+    ($count:literal ; $($T:ident),+) => {
+        impl<$($T: Encode),+> Encode for ($($T,)+) {
+            fn schema() -> &'static [u8] {
+                Box::leak({
+                    let mut v = Vec::new();
+                    v.push(OP_TUPLE | $count);
+                    $( v.extend_from_slice(<$T as SchemaOf>::schema_of()); )+
+                    v.into_boxed_slice()
+                })
+            }
+
+            fn encode_to(&self, buf: &mut [u8]) -> usize {
+                #[allow(non_snake_case)]
+                let ($(ref $T,)+) = *self;
+                let mut pos = 0;
+                $( pos += $T.encode_to(&mut buf[pos..]); )+
+                pos
+            }
+
+            fn max_encoded_size(&self) -> usize {
+                #[allow(non_snake_case)]
+                let ($(ref $T,)+) = *self;
+                0 $( + $T.max_encoded_size() )+
+            }
+        }
+    };
+}
+
+macro_rules! impl_tuple_encode {
+    ($($T:ident),+ $(,)?) => {
+        impl_tuple_encode! {
+            @walk
+            [1 2 3 4 5 6 7 8 9 10 11 12]
+            []
+            $($T),+
+        }
+    };
+
+    (@walk [$count:literal $($rest_counts:literal)*] [$($acc:ident,)*] $next:ident $(, $rest:ident)*) => {
+        impl_tuple_encode_one!($count; $($acc,)* $next);
+
+        impl_tuple_encode! {
+            @walk
+            [$($rest_counts)*]
+            [$($acc,)* $next,]
+            $($rest),*
+        }
+    };
+
+    (@walk [$($counts:literal)*] [$($acc:ident,)*]) => {};
+}
+
+impl_tuple_encode!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
+
+// ── Vec<T> Encode ───────────────────────────────────────────────────────────
+
+impl<T: Encode> Encode for Vec<T> {
+    fn schema() -> &'static [u8] {
+        Box::leak({
+            let mut v = Vec::new();
+            v.push(OP_SEQ | 2);
+            v.extend_from_slice(<T as SchemaOf>::schema_of());
+            v.into_boxed_slice()
+        })
+    }
+
+    fn encode_to(&self, buf: &mut [u8]) -> usize {
+        let len = (self.len() as u16).to_ne_bytes();
+        buf[0] = len[0];
+        buf[1] = len[1];
+        let mut pos = 2;
+        for item in self {
+            pos += item.encode_to(&mut buf[pos..]);
+        }
+        pos
+    }
+
+    fn max_encoded_size(&self) -> usize {
+        let count = self.len().min(65535);
+        2 + if self.is_empty() {
+            0
+        } else {
+            count * self[0].max_encoded_size()
+        }
+    }
+}
+
+// ── [T; N] Array Encode ─────────────────────────────────────────────────────
+
+macro_rules! impl_array_encode {
+    ($($n:literal),+) => {
+        $(
+            impl<T: Encode> Encode for [T; $n] {
+                fn schema() -> &'static [u8] {
+                    Box::leak({
+                        let mut v = Vec::new();
+                        v.push(OP_SEQ | 2);
+                        v.extend_from_slice(<T as SchemaOf>::schema_of());
+                        v.into_boxed_slice()
+                    })
+                }
+
+                fn encode_to(&self, buf: &mut [u8]) -> usize {
+                    let len = ($n as u16).to_ne_bytes();
+                    buf[0] = len[0];
+                    buf[1] = len[1];
+                    let mut pos = 2;
+                    for item in self {
+                        pos += item.encode_to(&mut buf[pos..]);
+                    }
+                    pos
+                }
+
+                fn max_encoded_size(&self) -> usize {
+                    #[allow(clippy::out_of_bounds_indexing)]
+                    {
+                        if $n == 0 {
+                            2
+                        } else {
+                            2 + $n * self[0].max_encoded_size()
+                        }
+                    }
+                }
+            }
+        )+
+    };
+}
+
+impl_array_encode!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 16, 32, 64, 128, 256);
+
+// ── Option<T> Encode ────────────────────────────────────────────────────────
+
+impl<T: Encode> Encode for Option<T> {
+    fn schema() -> &'static [u8] {
+        Box::leak({
+            let mut v: Vec<u8> = vec![OP_ENUM | 2, 1, 0, 0, 0, OP_UNIT, 5, 0];
+            v.extend_from_slice(<T as SchemaOf>::schema_of());
+            v.into_boxed_slice()
+        })
+    }
+
+    fn encode_to(&self, buf: &mut [u8]) -> usize {
+        match self {
+            None => {
+                buf[0] = 0u8;
+                1
+            }
+            Some(val) => {
+                buf[0] = 1u8;
+                1 + val.encode_to(&mut buf[1..])
+            }
+        }
+    }
+
+    fn max_encoded_size(&self) -> usize {
+        match self {
+            None => 1,
+            Some(val) => 1 + val.max_encoded_size(),
+        }
+    }
+
+    fn string_table(&self) -> &'static [u8] {
+        b"None\0Some\0"
+    }
+}
+
+// ── Result<T, E> Encode ─────────────────────────────────────────────────────
+
+impl<T: Encode, E: Encode> Encode for Result<T, E> {
+    fn schema() -> &'static [u8] {
+        Box::leak({
+            let mut v: Vec<u8> = vec![OP_ENUM | 2, 1, 0, 0, 0];
+            v.extend_from_slice(<T as SchemaOf>::schema_of());
+            v.extend_from_slice(&[3u8, 0u8]);
+            v.extend_from_slice(<E as SchemaOf>::schema_of());
+            v.into_boxed_slice()
+        })
+    }
+
+    fn encode_to(&self, buf: &mut [u8]) -> usize {
+        match self {
+            Ok(val) => {
+                buf[0] = 0u8;
+                1 + val.encode_to(&mut buf[1..])
+            }
+            Err(val) => {
+                buf[0] = 1u8;
+                1 + val.encode_to(&mut buf[1..])
+            }
+        }
+    }
+
+    fn max_encoded_size(&self) -> usize {
+        1 + match self {
+            Ok(val) => val.max_encoded_size(),
+            Err(val) => val.max_encoded_size(),
+        }
+    }
+
+    fn string_table(&self) -> &'static [u8] {
+        b"Ok\0Err\0"
+    }
+}
+
+// ── Box<T> Encode ───────────────────────────────────────────────────────────
+
+impl<T: std::fmt::Display> Encode for Box<T> {
+    fn schema() -> &'static [u8] {
+        <&str as Encode>::schema()
+    }
+
+    fn encode_to(&self, buf: &mut [u8]) -> usize {
+        self.to_string().as_str().encode_to(buf)
+    }
+
+    fn max_encoded_size(&self) -> usize {
+        512
+    }
+}
+
+// ── Arc<T> Encode ───────────────────────────────────────────────────────────
+
+impl<T: std::fmt::Display> Encode for std::sync::Arc<T> {
+    fn schema() -> &'static [u8] {
+        <&str as Encode>::schema()
+    }
+
+    fn encode_to(&self, buf: &mut [u8]) -> usize {
+        self.to_string().as_str().encode_to(buf)
+    }
+
+    fn max_encoded_size(&self) -> usize {
+        512
+    }
+}
+
+// ── Rc<T> Encode ────────────────────────────────────────────────────────────
+
+impl<T: std::fmt::Display> Encode for std::rc::Rc<T> {
+    fn schema() -> &'static [u8] {
+        <&str as Encode>::schema()
+    }
+
+    fn encode_to(&self, buf: &mut [u8]) -> usize {
+        self.to_string().as_str().encode_to(buf)
+    }
+
+    fn max_encoded_size(&self) -> usize {
+        512
+    }
+}
+
+// ── HashMap<K,V> Encode ─────────────────────────────────────────────────────
+
+impl<K: Encode + std::hash::Hash + Eq, V: Encode> Encode for std::collections::HashMap<K, V> {
+    fn schema() -> &'static [u8] {
+        Box::leak({
+            let mut v = Vec::new();
+            v.push(OP_SEQ | 3);
+            v.push(OP_TUPLE | 2);
+            v.extend_from_slice(<K as SchemaOf>::schema_of());
+            v.extend_from_slice(<V as SchemaOf>::schema_of());
+            v.into_boxed_slice()
+        })
+    }
+
+    fn encode_to(&self, buf: &mut [u8]) -> usize {
+        let len = (self.len() as u32).to_ne_bytes();
+        buf[0] = len[0];
+        buf[1] = len[1];
+        buf[2] = len[2];
+        buf[3] = len[3];
+        let mut pos = 4;
+        for (k, v) in self {
+            pos += k.encode_to(&mut buf[pos..]);
+            pos += v.encode_to(&mut buf[pos..]);
+        }
+        pos
+    }
+
+    fn max_encoded_size(&self) -> usize {
+        if self.is_empty() {
+            return 4;
+        }
+        let k = self.keys().next().unwrap().max_encoded_size();
+        let v = self.values().next().unwrap().max_encoded_size();
+        4 + self.len().saturating_mul(k + v)
+    }
+}
+
+// ── BTreeMap<K,V> Encode ────────────────────────────────────────────────────
+
+impl<K: Encode + Ord, V: Encode> Encode for std::collections::BTreeMap<K, V> {
+    fn schema() -> &'static [u8] {
+        Box::leak({
+            let mut v = Vec::new();
+            v.push(OP_SEQ | 3);
+            v.push(OP_TUPLE | 2);
+            v.extend_from_slice(<K as SchemaOf>::schema_of());
+            v.extend_from_slice(<V as SchemaOf>::schema_of());
+            v.into_boxed_slice()
+        })
+    }
+
+    fn encode_to(&self, buf: &mut [u8]) -> usize {
+        let len = (self.len() as u32).to_ne_bytes();
+        buf[0] = len[0];
+        buf[1] = len[1];
+        buf[2] = len[2];
+        buf[3] = len[3];
+        let mut pos = 4;
+        for (k, v) in self {
+            pos += k.encode_to(&mut buf[pos..]);
+            pos += v.encode_to(&mut buf[pos..]);
+        }
+        pos
+    }
+
+    fn max_encoded_size(&self) -> usize {
+        if self.is_empty() {
+            return 4;
+        }
+        let k = self.keys().next().unwrap().max_encoded_size();
+        let v = self.values().next().unwrap().max_encoded_size();
+        4 + self.len().saturating_mul(k + v)
     }
 }
 
@@ -649,75 +1041,120 @@ pub fn format_payload(
 
 // ── Public API for backend ─────────────────────────────────────────────────
 
-fn parse_schema_offsets(payload: &[u8], arg_count: usize) -> (Vec<(usize, usize)>, usize) {
-    let mut schema_pos = 1usize;
-    let mut schemas: Vec<(usize, usize)> = Vec::with_capacity(arg_count);
+fn parse_schema_offsets(
+    schemas: &[u8],
+    arg_count: usize,
+    skip_count_byte: bool,
+) -> Vec<(usize, usize)> {
+    let mut pos = if skip_count_byte { 1 } else { 0 };
+    let mut offsets: Vec<(usize, usize)> = Vec::with_capacity(arg_count);
     for _ in 0..arg_count {
-        if schema_pos >= payload.len() {
+        if pos >= schemas.len() {
             break;
         }
-        let schema_len = measure_schema(&payload[schema_pos..]);
-        schemas.push((schema_pos, schema_len));
-        schema_pos += schema_len;
+        let schema_len = measure_schema(&schemas[pos..]);
+        offsets.push((pos, schema_len));
+        pos += schema_len;
     }
-    (schemas, schema_pos)
+    offsets
 }
 
-/// Decodes args from the packed layout: count byte + all schemas + all payloads.
-pub fn decode_args(payload: &[u8]) -> Vec<String> {
-    if payload.is_empty() {
-        return vec![];
+struct SchemaInfo {
+    raw: &'static [u8],
+    offsets: Vec<(usize, usize)>,
+}
+
+/// Returns the schemas for this call site from Metadata.
+/// Format: [count: u8][concatenated schema bytes...]
+type OffsetCache = parking_lot::Mutex<std::collections::HashMap<usize, Vec<(usize, usize)>>>;
+
+fn get_schemas(metadata: &crate::metadata::Metadata) -> Option<SchemaInfo> {
+    use std::sync::LazyLock;
+
+    static OFFSETS: LazyLock<OffsetCache> =
+        LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+    let raw = (metadata.schema_provider)();
+    if raw.is_empty() {
+        return None;
     }
-    let arg_count = payload[0] as usize;
-    if arg_count == 0 || payload.is_empty() {
-        return vec![];
+    let arg_count = raw[0] as usize;
+    if arg_count == 0 {
+        return None;
     }
 
-    let (schemas, mut payload_pos) = parse_schema_offsets(payload, arg_count);
+    let offsets = OFFSETS
+        .lock()
+        .entry(raw.as_ptr() as usize)
+        .or_insert_with(|| parse_schema_offsets(raw, arg_count, true))
+        .clone();
 
-    let mut results = Vec::with_capacity(arg_count);
-    for (schema_start, schema_len) in &schemas {
-        let schema = &payload[*schema_start..*schema_start + *schema_len];
+    Some(SchemaInfo { raw, offsets })
+}
+
+/// Decodes args from payload using schemas from Metadata.
+pub fn decode_args(metadata: &crate::metadata::Metadata, payload: &[u8]) -> Vec<String> {
+    let Some(info) = get_schemas(metadata) else {
+        return vec![];
+    };
+    let string_tables = (metadata.string_tables_provider)();
+    let user_formatters = (metadata.user_formatters_provider)();
+    let mut results = Vec::with_capacity(info.offsets.len());
+    let mut payload_pos = 0;
+    for (schema_start, schema_len) in &info.offsets {
+        let schema = &info.raw[*schema_start..*schema_start + *schema_len];
         let mut s = String::new();
-        let used = format_payload(schema, &payload[payload_pos..], &[], &[], &mut s);
+        let used = format_payload(
+            schema,
+            &payload[payload_pos..],
+            string_tables,
+            user_formatters,
+            &mut s,
+        );
         payload_pos += used;
         results.push(s);
     }
     results
 }
 
-/// Format the log body by walking format_str + inline schemas + payload.
+/// Format the log body using schemas from Metadata, raw values from payload.
 pub fn format_body(metadata: &crate::metadata::Metadata, payload: &[u8]) -> String {
     let mut output = String::new();
     let mut remaining = metadata.format_str;
-    let mut schema_idx = 0;
 
-    if payload.is_empty() || payload[0] as usize == 0 {
-        output.push_str(remaining);
-        return output;
-    }
+    let string_tables = (metadata.string_tables_provider)();
+    let user_formatters = (metadata.user_formatters_provider)();
 
-    let arg_count = payload[0] as usize;
-    let (schemas, mut payload_pos) = parse_schema_offsets(payload, arg_count);
+    if let Some(info) = get_schemas(metadata) {
+        let mut schema_idx = 0;
+        let mut payload_pos = 0;
 
-    while let Some(brace) = remaining.find('{') {
-        output.push_str(&remaining[..brace]);
-        let after_brace = &remaining[brace + 1..];
-        let Some(close) = after_brace.find('}') else {
-            output.push_str(remaining);
-            remaining = "";
-            break;
-        };
-        remaining = &after_brace[close + 1..];
+        while let Some(brace) = remaining.find('{') {
+            output.push_str(&remaining[..brace]);
+            let after_brace = &remaining[brace + 1..];
+            let Some(close) = after_brace.find('}') else {
+                output.push_str(remaining);
+                remaining = "";
+                break;
+            };
+            remaining = &after_brace[close + 1..];
 
-        if schema_idx < schemas.len() {
-            let (schema_start, schema_len) = schemas[schema_idx];
-            let schema = &payload[schema_start..schema_start + schema_len];
-            let used = format_payload(schema, &payload[payload_pos..], &[], &[], &mut output);
-            payload_pos += used;
-            schema_idx += 1;
+            if schema_idx < info.offsets.len() {
+                let (schema_start, schema_len) = info.offsets[schema_idx];
+                let schema = &info.raw[schema_start..schema_start + schema_len];
+                let used = format_payload(
+                    schema,
+                    &payload[payload_pos..],
+                    string_tables,
+                    user_formatters,
+                    &mut output,
+                );
+                payload_pos += used;
+                schema_idx += 1;
+            }
         }
     }
+
     output.push_str(remaining);
     output
 }
@@ -837,22 +1274,22 @@ mod tests {
 
     #[test]
     fn schema_i32_is_signed_int_3() {
-        assert_eq!(<i32 as Encode>::SCHEMA, &[op_signed_int(3)]);
+        assert_eq!(<i32 as Encode>::schema(), &[op_signed_int(3)]);
     }
 
     #[test]
     fn schema_f64_is_float_4() {
-        assert_eq!(<f64 as Encode>::SCHEMA, &[op_float(4)]);
+        assert_eq!(<f64 as Encode>::schema(), &[op_float(4)]);
     }
 
     #[test]
     fn schema_bool() {
-        assert_eq!(<bool as Encode>::SCHEMA, &[op_bool()]);
+        assert_eq!(<bool as Encode>::schema(), &[op_bool()]);
     }
 
     #[test]
     fn schema_str() {
-        assert_eq!(<&str as Encode>::SCHEMA, &[op_str(2)]);
+        assert_eq!(<&str as Encode>::schema(), &[op_str(2)]);
     }
 
     // ── measure_schema tests ───────────────────────────────────────────
@@ -893,7 +1330,7 @@ mod tests {
     fn format_i32() {
         let mut buf = [0u8; 4];
         42i32.encode_to(&mut buf);
-        let result = format_one(<i32 as Encode>::SCHEMA, &buf);
+        let result = format_one(<i32 as Encode>::schema(), &buf);
         assert_eq!(result, "42");
     }
 
@@ -901,7 +1338,7 @@ mod tests {
     fn format_i64_negative() {
         let mut buf = [0u8; 8];
         (-123i64).encode_to(&mut buf);
-        let result = format_one(<i64 as Encode>::SCHEMA, &buf);
+        let result = format_one(<i64 as Encode>::schema(), &buf);
         assert_eq!(result, "-123");
     }
 
@@ -909,7 +1346,7 @@ mod tests {
     fn format_u32() {
         let mut buf = [0u8; 4];
         100u32.encode_to(&mut buf);
-        let result = format_one(<u32 as Encode>::SCHEMA, &buf);
+        let result = format_one(<u32 as Encode>::schema(), &buf);
         assert_eq!(result, "100");
     }
 
@@ -917,7 +1354,7 @@ mod tests {
     fn format_f64() {
         let mut buf = [0u8; 8];
         3.14f64.encode_to(&mut buf);
-        let result = format_one(<f64 as Encode>::SCHEMA, &buf);
+        let result = format_one(<f64 as Encode>::schema(), &buf);
         assert!(result.contains("3.14"));
     }
 
@@ -925,15 +1362,15 @@ mod tests {
     fn format_str() {
         let mut buf = [0u8; 32];
         let wrote = "hello".encode_to(&mut buf);
-        let result = format_one(<&str as Encode>::SCHEMA, &buf[..wrote]);
+        let result = format_one(<&str as Encode>::schema(), &buf[..wrote]);
         assert_eq!(result, "hello");
     }
 
     #[test]
     fn format_bool() {
-        let result = format_one(<bool as Encode>::SCHEMA, &[1]);
+        let result = format_one(<bool as Encode>::schema(), &[1]);
         assert_eq!(result, "true");
-        let result = format_one(<bool as Encode>::SCHEMA, &[0]);
+        let result = format_one(<bool as Encode>::schema(), &[0]);
         assert_eq!(result, "false");
     }
 
@@ -941,13 +1378,13 @@ mod tests {
     fn format_char() {
         let mut buf = [0u8; 4];
         'X'.encode_to(&mut buf);
-        let result = format_one(<char as Encode>::SCHEMA, &buf);
+        let result = format_one(<char as Encode>::schema(), &buf);
         assert_eq!(result, "X");
     }
 
     #[test]
     fn format_unit() {
-        let result = format_one(<() as Encode>::SCHEMA, &[]);
+        let result = format_one(<() as Encode>::schema(), &[]);
         assert_eq!(result, "()");
     }
 
@@ -1036,33 +1473,44 @@ mod tests {
 
     #[test]
     fn format_large_i32() {
-        // Verify read_signed_ne uses correct byte count (was using k=3→3 bytes, should be 4)
-        let val: i32 = 0x7FFF_FFFF; // max i32: 2147483647
+        let val: i32 = 0x7FFF_FFFF;
         let mut buf = [0u8; 4];
         val.encode_to(&mut buf);
-        let result = format_one(<i32 as Encode>::SCHEMA, &buf);
+        let result = format_one(<i32 as Encode>::schema(), &buf);
         assert_eq!(result, "2147483647");
     }
 
     #[test]
     fn format_large_u32() {
-        let val: u32 = 0xFFFF_FFFF; // max u32: 4294967295
+        let val: u32 = 0xFFFF_FFFF;
         let mut buf = [0u8; 4];
         val.encode_to(&mut buf);
-        let result = format_one(<u32 as Encode>::SCHEMA, &buf);
+        let result = format_one(<u32 as Encode>::schema(), &buf);
         assert_eq!(result, "4294967295");
     }
 
     #[test]
     fn format_large_i64() {
-        let val: i64 = 0x7FFF_FFFF_FFFF_FFFF; // max i64
+        let val: i64 = 0x7FFF_FFFF_FFFF_FFFF;
         let mut buf = [0u8; 8];
         val.encode_to(&mut buf);
-        let result = format_one(<i64 as Encode>::SCHEMA, &buf);
+        let result = format_one(<i64 as Encode>::schema(), &buf);
         assert_eq!(result, "9223372036854775807");
     }
 
     // ── format_body tests ──────────────────────────────────────────────
+
+    fn schema_bytes_i32_f64() -> &'static [u8] {
+        Box::leak(Box::new([2u8, op_signed_int(3), op_float(4)]))
+    }
+
+    fn schema_bytes_one_i32() -> &'static [u8] {
+        Box::leak(Box::new([1u8, op_signed_int(3)]))
+    }
+
+    fn empty_schemas() -> &'static [u8] {
+        &[]
+    }
 
     #[test]
     fn format_body_simple() {
@@ -1072,15 +1520,14 @@ mod tests {
             "test.rs",
             1,
             "test",
+            schema_bytes_i32_f64,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
         );
-        // Payload: count(2) + schema_i32 + schema_f64 + payload_i32 + payload_f64
-        let mut payload = vec![0u8; 1 + 1 + 1 + 4 + 8]; // count + 2 schemas + data
-        payload[0] = 2; // arg_count
-        payload[1] = op_signed_int(3); // i32 schema
-        payload[2] = op_float(4); // f64 schema
-        let data_off = 3;
-        42i32.encode_to(&mut payload[data_off..]);
-        3.14f64.encode_to(&mut payload[data_off + 4..]);
+        // Payload: just encoded values, no count/schemas
+        let mut payload = vec![0u8; 4 + 8];
+        42i32.encode_to(&mut payload[..]);
+        3.14f64.encode_to(&mut payload[4..]);
         let result = format_body(&metadata, &payload);
         assert!(result.contains("x: 42"), "got: {result}");
         assert!(result.contains("y: 3.14"), "got: {result}");
@@ -1094,8 +1541,11 @@ mod tests {
             "test.rs",
             1,
             "test",
+            empty_schemas,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
         );
-        let result = format_body(&metadata, &[0]);
+        let result = format_body(&metadata, &[]);
         assert_eq!(result, "no args");
     }
 
@@ -1107,12 +1557,13 @@ mod tests {
             "test.rs",
             1,
             "test",
+            schema_bytes_one_i32,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
         );
-        // Payload: count(1) + schema_i32 + data_i32
-        let mut payload = vec![0u8; 1 + 1 + 4];
-        payload[0] = 1; // arg_count
-        payload[1] = op_signed_int(3);
-        42i32.encode_to(&mut payload[2..]);
+        // Payload: just one i32, no schemas
+        let mut payload = vec![0u8; 4];
+        42i32.encode_to(&mut payload[..]);
         let result = format_body(&metadata, &payload);
         assert!(result.contains("a: 42"));
     }
@@ -1125,11 +1576,12 @@ mod tests {
             "test.rs",
             1,
             "test",
+            schema_bytes_one_i32,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
         );
-        let mut payload = vec![0u8; 1 + 1 + 4];
-        payload[0] = 1;
-        payload[1] = op_signed_int(3);
-        99i32.encode_to(&mut payload[2..]);
+        let mut payload = vec![0u8; 4];
+        99i32.encode_to(&mut payload[..]);
         let result = format_body(&metadata, &payload);
         assert!(result.contains("val: 99"), "got: {result}");
     }
@@ -1317,16 +1769,28 @@ mod tests {
 
     // ── decode_args tests ───────────────────────────────────────────────
 
+    fn schema_i32_f64() -> &'static [u8] {
+        Box::leak(Box::new([2u8, op_signed_int(3), op_float(4)]))
+    }
+
     #[test]
     fn decode_args_two_ints() {
-        let mut buf = [0u8; 32];
-        buf[0] = 2; // arg_count
-        buf[1] = op_signed_int(3);
-        buf[2] = op_float(4);
-        let mut pos = 3;
+        let metadata = crate::metadata::Metadata::new(
+            crate::level::LogLevel::Info,
+            "",
+            "",
+            0,
+            "",
+            schema_i32_f64,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
+        );
+        // Payload: just raw encoded values, no schemas
+        let mut buf = [0u8; 16];
+        let mut pos = 0;
         pos += 42i32.encode_to(&mut buf[pos..]);
         3.14f64.encode_to(&mut buf[pos..]);
-        let decoded = decode_args(&buf);
+        let decoded = decode_args(&metadata, &buf);
         assert_eq!(decoded.len(), 2);
         assert_eq!(decoded[0], "42");
         assert!(decoded[1].contains("3.14"));
@@ -1334,21 +1798,50 @@ mod tests {
 
     #[test]
     fn decode_args_empty() {
-        assert!(decode_args(&[]).is_empty());
+        let metadata = crate::metadata::Metadata::new(
+            crate::level::LogLevel::Info,
+            "",
+            "",
+            0,
+            "",
+            empty_schemas,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
+        );
+        assert!(decode_args(&metadata, &[]).is_empty());
     }
 
     #[test]
     fn decode_args_zero_arg_count() {
-        let buf = [0u8];
-        assert!(decode_args(&buf).is_empty());
+        let metadata = crate::metadata::Metadata::new(
+            crate::level::LogLevel::Info,
+            "",
+            "",
+            0,
+            "",
+            empty_schemas,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
+        );
+        assert!(decode_args(&metadata, &[]).is_empty());
     }
 
     #[test]
-    fn decode_args_truncated_schema() {
-        // count=2 but only 1 schema byte available → only 1 schema parsed
-        let buf = [2u8, 0x13]; // count=2, i32 schema, no payload
-        let decoded = decode_args(&buf);
-        assert_eq!(decoded.len(), 1, "expected 1 schema, got {:?}", decoded);
+    fn decode_args_truncated_payload() {
+        let metadata = crate::metadata::Metadata::new(
+            crate::level::LogLevel::Info,
+            "",
+            "",
+            0,
+            "",
+            schema_bytes_one_i32,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
+        );
+        // Only 1 byte of payload for i32 (needs 4). Does not panic, returns empty format.
+        let decoded = decode_args(&metadata, &[0u8]);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0], "");
     }
 
     // ── format_body edge case tests ─────────────────────────────────────
@@ -1361,15 +1854,15 @@ mod tests {
             "test.rs",
             1,
             "test",
+            schema_bytes_one_i32,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
         );
-        // Only one arg in payload
-        let mut payload = vec![0u8; 1 + 1 + 4];
-        payload[0] = 1;
-        payload[1] = op_signed_int(3);
-        5i32.encode_to(&mut payload[2..]);
+        // Only one arg in payload, no schemas
+        let mut payload = vec![0u8; 4];
+        5i32.encode_to(&mut payload[..]);
         let result = format_body(&metadata, &payload);
         assert!(result.contains("a: 5"));
-        // The second placeholder is unmatched; literal "b: " appears but {} is skipped
         assert!(!result.contains("b: 5"));
     }
 
@@ -1381,8 +1874,121 @@ mod tests {
             "test.rs",
             1,
             "test",
+            empty_schemas,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
         );
         let result = format_body(&metadata, &[]);
         assert_eq!(result, "hello");
+    }
+
+    // ── Tuple tests (4.2) ───────────────────────────────────────────────
+
+    fn fmt_tuple_payload(schema: &[u8], payload: &[u8]) -> String {
+        let mut s = String::new();
+        format_payload(schema, payload, &[], &[], &mut s);
+        s
+    }
+
+    #[test]
+    fn encode_decode_tuple_1_i32() {
+        let val: (i32,) = (42,);
+        let mut buf = [0u8; 64];
+        let wrote = val.encode_to(&mut buf);
+        let schema = <(i32,) as Encode>::schema();
+        assert!(schema[0] & OP_TUPLE != 0);
+        let result = fmt_tuple_payload(schema, &buf[..wrote]);
+        assert_eq!(result, "(42)");
+    }
+
+    #[test]
+    fn encode_decode_tuple_2_i32_f64() {
+        let val: (i32, f64) = (42, 3.14);
+        let mut buf = [0u8; 64];
+        let wrote = val.encode_to(&mut buf);
+        let schema = <(i32, f64) as Encode>::schema();
+        assert!(schema[0] & OP_TUPLE != 0);
+        let result = fmt_tuple_payload(schema, &buf[..wrote]);
+        assert!(result.contains("42"));
+        assert!(result.contains("3.14"));
+    }
+
+    #[test]
+    fn encode_decode_tuple_3_mixed() {
+        let val: (i32, &str, bool) = (1, "hello", true);
+        let mut buf = [0u8; 128];
+        let wrote = val.encode_to(&mut buf);
+        let schema = <(i32, &str, bool) as Encode>::schema();
+        let result = fmt_tuple_payload(schema, &buf[..wrote]);
+        assert!(result.contains("1"));
+        assert!(result.contains("hello"));
+        assert!(result.contains("true"));
+    }
+
+    #[test]
+    fn encode_decode_tuple_empty_0() {
+        let mut buf = [0u8; 4];
+        let wrote = ().encode_to(&mut buf);
+        assert_eq!(wrote, 0);
+        let result = fmt_tuple_payload(<() as Encode>::schema(), &[]);
+        assert_eq!(result, "()");
+    }
+
+    #[test]
+    fn encode_decode_tuple_12_max() {
+        let val: (i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32) =
+            (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12);
+        let mut buf = [0u8; 256];
+        let wrote = val.encode_to(&mut buf);
+        let schema =
+            <(i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32) as Encode>::schema();
+        assert!(measure_schema(schema) > 1);
+        let result = fmt_tuple_payload(schema, &buf[..wrote]);
+        for i in 1..=12 {
+            assert!(result.contains(&i.to_string()), "missing {i} in {result:?}");
+        }
+    }
+
+    #[test]
+    fn tuple_schema_starts_with_op_tuple_n() {
+        let schema = <(i32, f64) as Encode>::schema();
+        assert!((schema[0] & CAT_MASK) == OP_TUPLE);
+        assert!((schema[0] & SIZE_MASK) == 2);
+    }
+
+    #[test]
+    fn tuple_max_encoded_size_equals_sum() {
+        let val: (i32, f64) = (42, 3.14);
+        let max = val.max_encoded_size();
+        let actual = 42i32.max_encoded_size() + 3.14f64.max_encoded_size();
+        assert_eq!(max, actual);
+    }
+
+    #[test]
+    fn tuple_nested_1tuple() {
+        let s1 = <(i32,) as Encode>::schema();
+        assert_eq!(s1.len(), 2);
+
+        let s2 = <((i32,), (i32,)) as Encode>::schema();
+        assert_eq!(s2.len(), 5);
+    }
+
+    #[test]
+    fn tuple_nested_tuple_2d() {
+        let val: ((i32, i32), (i32, i32)) = ((1, 2), (3, 4));
+        let mut buf = [0u8; 256];
+        let wrote = val.encode_to(&mut buf);
+        assert_eq!(wrote, 16);
+        let schema = <((i32, i32), (i32, i32)) as Encode>::schema();
+        assert_eq!(schema.len(), 7);
+        let result = fmt_tuple_payload(schema, &buf[..wrote]);
+        assert!(result.contains("((1, 2), (3, 4))"), "got: {result:?}");
+    }
+
+    #[test]
+    fn tuple_measure_schema_correct() {
+        let schema = <(i32, f64) as Encode>::schema();
+        let measured = measure_schema(schema);
+        assert_eq!(measured, schema.len());
     }
 }

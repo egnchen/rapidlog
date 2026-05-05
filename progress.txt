@@ -342,3 +342,36 @@ Replaced the rkyv-based serialization with a self-describing recursive schema by
 - **`ptr::write` does NOT drop the old value** — must call `drop_in_place` first when replacing live objects in UnsafeCell-managed memory. Failure to do so silently leaks producers and orphans consumers in the registry.
 - **Loop/match guards for single-mode operations add measurable overhead** — branching on `QueueMode` once before the loop eliminates the loop entirely for the common BoundedDropping case.
 - **Separate sizing passes multiply reference-taking overhead** — merging arg-count + schema-size + payload-size into a single `$()*` block reduces the number of times each arg is borrowed.
+
+---
+
+## [2026-05-06] — Phase 4: Custom Types & Extended Encode Support
+
+### What was done
+- **4.0 `Encode` trait change**: `const SCHEMA` → `fn schema()` with `static` references for primitives. All ~15 impls updated.
+- **4.1 String table threading**: Added `string_tables_provider` to `Metadata`, wired through `format_body` and `decode_args`. Macro collects per-arg string tables lazily via `Encode::string_table(&self)` default method.
+- **4.2 Tuples**: Built-in `Encode` for tuples `(T0,)` through `(T0,...,T11)` using recursive macro `impl_tuple_encode!`. Schema uses `OP_TUPLE|N` + concatenated sub-type schemas.
+- **4.3 `Vec<T>`, `[T; N]`**: Built-in Encode with `OP_SEQ|2` (u16 count). Arrays for sizes 0-10, 16, 32, 64, 128, 256 via macro.
+- **4.4 `Option<T>`, `Result<T, E>`**: Built-in Encode as `OP_ENUM` with static string tables `b"None\0Some\0"` and `b"Ok\0Err\0"`. Dispatch via `string_table(&self)` method.
+- **4.5 `Box<T>`, `Arc<T>`, `Rc<T>`**: Hot-path format via `Display::to_string()` → encoded as `&str`. One allocation, no ring buffer copy of T.
+- **4.6 `HashMap<K,V>`, `BTreeMap<K,V>`**: Built-in Encode as `OP_SEQ(OP_TUPLE(K,V))` with u32 count.
+- **4.7 Derive macro improvements**: Removed single-byte schema constraint — now uses `SchemaOf` trait to embed full sub-type schemas via `Box::leak`. Added tuple struct support (`OP_TUPLE`), multi-field tuple variants (`OP_TUPLE`), struct variants (`OP_STRUCT`).
+- **4.8 User formatters plumbing**: Added `user_formatters_provider` to `Metadata`, wired through `format_body`/`decode_args`. Macro provides default empty provider.
+- **4.9 Integration tests**: Added tests for tuple, Vec, Option, Result, Box.
+
+### Files changed/created
+- `src/arg.rs` — Trait change + tuple/Vec/Option/Result/Box/Arc/Rc/HashMap/BTreeMap impls + `SchemaOf` trait + `format_body`/`decode_args` wiring for string tables and user formatters
+- `src/metadata.rs` — Added `string_tables_provider` + `user_formatters_provider` fields + empty provider helpers
+- `src/macros.rs` — `_STRING_TABLES` OnceLock + `__string_tables` + `__user_formatters` providers
+- `src/backend.rs` — Updated test Metadata::new calls
+- `rapidlog_derive/src/lib.rs` — Full rewrite: single-byte → full-slice schemas, tuple struct support, multi-field + struct enum variants
+- `tests/integration.rs` — 5 new compound-type integration tests
+
+### Learnings for future iterations
+- **`OnceLock` in generic functions can deadlock with nested instantiations** — when `schema()` for `((i32,i32),(i32,i32))` calls `<(i32,i32)>::schema()` inside its `get_or_init` closure, the compiler may merge statics across monomorphizations. Workaround: `Box::leak` for compound-type schemas (tiny per-type leak, a few bytes). The `SchemaOf` trait (blanket `impl<T:Encode> SchemaOf for T`) provides unambiguous trait dispatch for sub-type schema access.
+- **`OnceLock` works fine for derive-generated concrete types** — the issue is specific to generic impls. Derive-generated code can safely use `OnceLock`.
+- **`Box::leak` is acceptable for schema caching** — schemas are per-type (not per-message) and typically <100 bytes. A proper caching layer (`OnceLock` or equivalent) should be added when the compiler issue is resolved or worked around.
+- **String tables via `Encode::string_table(&self)`** — default returns `&[]`, overridden by `Option`/`Result`/derive types. Caller thread collects per call site via `OnceLock<Box<[&'static [u8]]>>`.
+- **`SchemaOf` trait pattern** — `pub trait SchemaOf { fn schema_of() -> &'static [u8]; }` with `impl<T:Encode> SchemaOf for T` — avoids trait resolution ambiguity when calling sub-type schemas from within generic impls.
+- **Derive macro `string_table(&self)` override** — generated types implement `HasStringTable` and override the Encode method to delegate to it: `fn string_table(&self) -> &'static [u8] { <Self as HasStringTable>::STRING_TABLE }`.
+---

@@ -167,6 +167,22 @@ mod tests {
     use crate::thread_context::TEST_SERIAL;
     use std::sync::Mutex as StdMutex;
 
+    fn empty_schemas() -> &'static [u8] {
+        &[]
+    }
+
+    fn schema_one_i32() -> &'static [u8] {
+        Box::leak(Box::new([1u8, arg::op_signed_int(3)]))
+    }
+
+    fn schema_two_i32() -> &'static [u8] {
+        Box::leak(Box::new([
+            2u8,
+            arg::op_signed_int(3),
+            arg::op_signed_int(3),
+        ]))
+    }
+
     struct CountingSink {
         count: StdMutex<usize>,
     }
@@ -209,10 +225,13 @@ mod tests {
             "test.rs",
             10,
             "test",
+            schema_one_i32,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
         )));
 
-        // Payload: count(1) + schema_i32(1) + data_i32(4)
-        let payload_size = 1 + 1 + 4;
+        // Payload: just encoded i32 (no count/schemas)
+        let payload_size = 4;
         let total_size = HEADER_SIZE + payload_size;
         let mut buf = vec![0u8; total_size];
 
@@ -223,9 +242,7 @@ mod tests {
         );
         header.serialize_into(&mut buf[..HEADER_SIZE]);
 
-        buf[HEADER_SIZE] = 1; // arg_count
-        buf[HEADER_SIZE + 1] = arg::op_signed_int(3); // i32 schema
-        42i32.encode_to(&mut buf[HEADER_SIZE + 2..]);
+        42i32.encode_to(&mut buf[HEADER_SIZE..]);
 
         ThreadContext::init();
         ThreadContext::push(&buf).unwrap();
@@ -253,22 +270,22 @@ mod tests {
             "src/main.rs",
             42,
             "my_crate",
+            schema_two_i32,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
         )));
 
         let logger = Logger::new("test_logger".to_string(), vec![]);
-        // Payload: count(2) + schema_i32(1) + schema_i32(1) + data_i32(4) + data_i32(4)
-        let payload_size = 1 + 1 + 1 + 4 + 4;
+        // Payload: just 2 encoded i32s, no schemas
+        let payload_size = 4 + 4;
         let mut buf = vec![0u8; HEADER_SIZE + payload_size];
 
         let header =
             ArchivedHeader::new(1_700_000_001, meta, Arc::as_ptr(&logger) as *const Logger);
         header.serialize_into(&mut buf[..HEADER_SIZE]);
 
-        buf[HEADER_SIZE] = 2; // arg_count
-        buf[HEADER_SIZE + 1] = arg::op_signed_int(3); // i32 schema
-        buf[HEADER_SIZE + 2] = arg::op_signed_int(3); // i32 schema
-        123i32.encode_to(&mut buf[HEADER_SIZE + 3..]);
-        456i32.encode_to(&mut buf[HEADER_SIZE + 3 + 4..]);
+        123i32.encode_to(&mut buf[HEADER_SIZE..]);
+        456i32.encode_to(&mut buf[HEADER_SIZE + 4..]);
 
         let decoded = ArchivedHeader::decode(&buf).unwrap();
         let payload = &buf[HEADER_SIZE..];
@@ -287,10 +304,14 @@ mod tests {
             "src/lib.rs",
             100,
             "rapidlog",
+            schema_one_i32,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
         )));
 
         let logger = Logger::new("pat_logger".to_string(), vec![]);
-        let payload_size = 1 + 1 + 4; // count + schema + data
+        // Payload: just encoded i32, no schemas
+        let payload_size = 4;
         let mut buf = vec![0u8; HEADER_SIZE + payload_size];
 
         let header = ArchivedHeader::new(
@@ -299,9 +320,7 @@ mod tests {
             Arc::as_ptr(&logger) as *const Logger,
         );
         header.serialize_into(&mut buf[..HEADER_SIZE]);
-        buf[HEADER_SIZE] = 1;
-        buf[HEADER_SIZE + 1] = arg::op_signed_int(3);
-        99i32.encode_to(&mut buf[HEADER_SIZE + 2..]);
+        99i32.encode_to(&mut buf[HEADER_SIZE..]);
 
         let decoded = ArchivedHeader::decode(&buf).unwrap();
         let payload = &buf[HEADER_SIZE..];
@@ -329,13 +348,15 @@ mod tests {
             "test.rs",
             1,
             "test",
+            empty_schemas,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
         )));
 
         for ts in [300, 100, 200] {
-            let mut buf = vec![0u8; HEADER_SIZE + 1]; // header + count=0
+            let mut buf = vec![0u8; HEADER_SIZE]; // header only, no payload
             let header = ArchivedHeader::new(ts, meta, Arc::as_ptr(&logger) as *const Logger);
             header.serialize_into(&mut buf);
-            buf[HEADER_SIZE] = 0; // arg_count = 0
             ThreadContext::push(&buf).unwrap();
         }
 
@@ -367,12 +388,14 @@ mod tests {
             "test.rs",
             1,
             "test",
+            empty_schemas,
+            crate::metadata::empty_string_tables_provider,
+            crate::metadata::empty_user_formatters_provider,
         )));
 
-        let mut buf = vec![0u8; HEADER_SIZE + 1]; // header + count=0
+        let mut buf = vec![0u8; HEADER_SIZE]; // header only, no payload
         let header = ArchivedHeader::new(100, meta, Arc::as_ptr(&logger) as *const Logger);
         header.serialize_into(&mut buf);
-        buf[HEADER_SIZE] = 0;
 
         ThreadContext::init();
         ThreadContext::push(&buf).unwrap();

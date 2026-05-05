@@ -73,28 +73,33 @@ impl ThreadContext {
         }
     }
 
+    #[inline(always)]
     pub fn push_encoded<R>(
         total_msg: usize,
         mut encode: impl FnMut(&mut [u8]) -> R,
     ) -> Result<R, PushError> {
         // SAFETY: get_ctx() returns a valid, non-aliased *mut ThreadContext
         // that is exclusively owned by this thread via TLS.
-        unsafe { &mut *get_ctx() }.push_encoded_inner(total_msg, &mut encode)
+        let ctx = unsafe { &mut *get_ctx() };
+        if ctx.mode == QueueMode::BoundedDropping {
+            ctx.producer.push_encoded(total_msg, &mut encode)
+        } else {
+            Self::push_encoded_unbounded(ctx, total_msg, &mut encode)
+        }
     }
 
-    fn push_encoded_inner<R>(
-        &mut self,
+    #[cold]
+    #[inline(never)]
+    fn push_encoded_unbounded<R>(
+        ctx: &mut ThreadContext,
         total_msg: usize,
         encode: &mut impl FnMut(&mut [u8]) -> R,
     ) -> Result<R, PushError> {
-        if self.mode == QueueMode::BoundedDropping {
-            return self.producer.push_encoded(total_msg, encode);
-        }
         loop {
-            match self.producer.push_encoded(total_msg, encode) {
+            match ctx.producer.push_encoded(total_msg, encode) {
                 Ok(r) => return Ok(r),
                 Err(PushError::Full) => {
-                    if let Some(new_cons) = self.producer.grow() {
+                    if let Some(new_cons) = ctx.producer.grow() {
                         CONSUMER_REGISTRY.lock().push(new_cons);
                     } else {
                         return Err(PushError::Full);
@@ -162,7 +167,7 @@ fn set_or_create_ctx_with_mode(mode: QueueMode, start_capacity: usize) -> *mut T
     })
 }
 
-#[inline]
+#[inline(always)]
 fn get_ctx() -> *mut ThreadContext {
     CTX.with(|ctx| ctx.get())
 }

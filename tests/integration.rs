@@ -429,3 +429,134 @@ fn integration_bounded_does_not_panic() {
     // We don't assert a minimum count — just that no panic occurred
     let _count = sink.count.load(Ordering::Relaxed);
 }
+
+// ── Phase 4 integration tests ───────────────────────────────────────────────
+
+#[test]
+fn integration_log_tuple() {
+    let sink = CountingSink::new();
+    let logger = Frontend::create_or_get_logger("int_tuple", vec![sink.clone()]);
+    logger.set_log_level(LogLevel::TraceL3);
+    let backend = Backend::start(BackendOptions {
+        sleep_duration: Duration::from_millis(1),
+        min_batch_size: 1,
+        ..Default::default()
+    });
+    Frontend::preallocate();
+    rapidlog::log_info!(logger, "t: {}", (1, "hi", true));
+    wait_for(&sink, 1);
+    backend.stop();
+    let mut backend = backend;
+    backend.join();
+    let msgs = sink.messages.lock().unwrap();
+    assert!(
+        msgs.iter().any(|m| m.contains("(1, hi, true)")),
+        "got: {msgs:?}"
+    );
+}
+
+#[test]
+fn integration_log_vec_i32() {
+    let sink = CountingSink::new();
+    let logger = Frontend::create_or_get_logger("int_vec", vec![sink.clone()]);
+    logger.set_log_level(LogLevel::TraceL3);
+    let backend = Backend::start(BackendOptions {
+        sleep_duration: Duration::from_millis(1),
+        min_batch_size: 1,
+        ..Default::default()
+    });
+    Frontend::preallocate();
+    rapidlog::log_info!(logger, "v: {}", vec![1, 2, 3]);
+    wait_for(&sink, 1);
+    backend.stop();
+    let mut backend = backend;
+    backend.join();
+    let msgs = sink.messages.lock().unwrap();
+    assert!(
+        msgs.iter().any(|m| m.contains("[1, 2, 3]")),
+        "got: {msgs:?}"
+    );
+}
+
+#[test]
+fn integration_log_option() {
+    let sink = CountingSink::new();
+    let logger = Frontend::create_or_get_logger("int_opt", vec![sink.clone()]);
+    logger.set_log_level(LogLevel::TraceL3);
+    let backend = Backend::start(BackendOptions {
+        sleep_duration: Duration::from_millis(1),
+        min_batch_size: 1,
+        ..Default::default()
+    });
+    Frontend::preallocate();
+    rapidlog::log_info!(logger, "some: {}, none: {}", Some(42), None::<i32>);
+    wait_for(&sink, 1);
+    backend.stop();
+    let mut backend = backend;
+    backend.join();
+    let msgs = sink.messages.lock().unwrap();
+    let m = msgs.first().unwrap();
+    assert!(m.contains("Some(42)"), "got: {m}");
+    assert!(m.contains("None"), "got: {m}");
+}
+
+#[test]
+fn integration_log_result() {
+    let sink = CountingSink::new();
+    let logger = Frontend::create_or_get_logger("int_res", vec![sink.clone()]);
+    logger.set_log_level(LogLevel::TraceL3);
+    let backend = Backend::start(BackendOptions {
+        sleep_duration: Duration::from_millis(1),
+        min_batch_size: 1,
+        ..Default::default()
+    });
+    Frontend::preallocate();
+    let ok: Result<i32, &str> = Ok(1);
+    let err: Result<i32, &str> = Err("e");
+    rapidlog::log_info!(logger, "ok: {}, err: {}", ok, err);
+    wait_for(&sink, 1);
+    backend.stop();
+    let mut backend = backend;
+    backend.join();
+    let msgs = sink.messages.lock().unwrap();
+    let m = msgs.first().unwrap();
+    assert!(m.contains("Ok(1)"), "got: {m}");
+    assert!(m.contains("Err(e)"), "got: {m}");
+}
+
+#[test]
+fn integration_log_box() {
+    let sink = CountingSink::new();
+    let logger = Frontend::create_or_get_logger("int_box", vec![sink.clone()]);
+    logger.set_log_level(LogLevel::TraceL3);
+    let backend = Backend::start(BackendOptions {
+        sleep_duration: Duration::from_millis(1),
+        min_batch_size: 1,
+        ..Default::default()
+    });
+    Frontend::preallocate();
+    rapidlog::log_info!(logger, "b: {}", Box::new(99));
+    wait_for(&sink, 1);
+    backend.stop();
+    let mut backend = backend;
+    backend.join();
+    let msgs = sink.messages.lock().unwrap();
+    assert!(msgs.iter().any(|m| m.contains("99")), "got: {msgs:?}");
+}
+
+fn wait_for(sink: &CountingSink, expected: usize) {
+    let start = std::time::Instant::now();
+    loop {
+        if sink.count.load(Ordering::Relaxed) >= expected {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!(
+                "timeout: only {}/{} messages processed",
+                sink.count.load(Ordering::Relaxed),
+                expected
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
