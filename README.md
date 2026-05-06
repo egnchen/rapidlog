@@ -131,19 +131,79 @@ impl Filter for RateLimitFilter {
 
 ## Argument Types
 
-| Rust Type | Encoded As |
-|-----------|-----------|
-| `i32`, `i64`, `u32`, `u64`, `usize`, `bool` | 8-byte integer |
-| `f32`, `f64` | 8-byte float |
-| `&str`, `String` | 2-byte length + UTF-8 bytes |
-| Custom `Display`/`Debug` | `DisplayArg<T>`, `DebugArg<T>` wrappers |
+All types are encoded into a self-describing binary format. The backend decodes
+and formats on the worker thread — no formatting happens on the hot path.
+
+### Primitives
+
+| Rust Type | Encoding |
+|-----------|----------|
+| `i8`, `i16`, `i32`, `i64`, `i128` | sign-extended native endian |
+| `u8`, `u16`, `u32`, `u64`, `u128`, `usize` | zero-extended native endian |
+| `f32`, `f64` | native endian IEEE 754 |
+| `bool` | 1 byte (0 or 1) |
+| `char` | 4 bytes, `u32` code point |
+| `&str`, `String` | 2-byte LE length + UTF-8 bytes |
+| `Option<T>` | 1-byte discriminant + `T` payload |
+| `Result<T, E>` | 1-byte discriminant + `Ok(T)` or `Err(E)` payload |
+| `()` (unit) | 0 bytes |
+
+### Collections
+
+| Rust Type | Encoding |
+|-----------|----------|
+| `(A, B, …)` up to 12 elements | concatenated element payloads |
+| `[T; N]` | 2-byte LE count + elements |
+| `Vec<T>` | 2-byte LE count + elements |
+| `HashMap<K, V>`, `BTreeMap<K, V>` | 4-byte LE count + `(K, V)` pair elements |
+
+### Display/Debug Fallbacks
+
+For types that don't implement `rapidlog::arg::Encode`, use wrapper adapters:
 
 ```rust
-use rapidlog::arg::DebugArg;
+use rapidlog::arg::{DisplayArg, DebugArg};
 
 let vec = vec![1, 2, 3];
 rapidlog::log_info!(logger, "data: {:?}", DebugArg(&vec));
 ```
+
+`DisplayArg<T>` and `DebugArg<T>` pre-format the value with `Display`/`Debug` at
+the call site (one heap allocation for the formatted string).
+
+### Custom Types (Derive Macro)
+
+Enable the `derive` feature to encode structs and enums directly:
+
+```toml
+[dependencies]
+rapidlog = { version = "0.1", features = ["derive"] }
+```
+
+```rust
+use rapidlog_derive::Encode;
+
+#[derive(Encode)]
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Encode)]
+enum Status {
+    Idle,
+    Running { task: &'static str },
+    Done(u32),
+}
+
+let pt = Point { x: 1.0, y: 2.0 };
+let status = Status::Running { task: "render" };
+rapidlog::log_info!(logger, "pt: {}, status: {}", pt, status);
+// Output: pt: {x: 1, y: 2}, status: Running(task: render)
+```
+
+The derive macro generates a self-describing schema bytecode at compile time.
+Field and variant names are stored as null-terminated UTF-8 in string tables.
 
 ## Sinks
 
@@ -246,18 +306,24 @@ log calls on that thread, regardless of which logger is used.
 
 ## Benchmarks
 
-Latency per log call (hot path, release build, TSC clock enabled):
+Latency per log call (hot path, release build):
 
 | Benchmark | Time |
 |-----------|------|
-| 1 integer | **~4.0 ns** |
-| 2 floats | **~4.6 ns** |
-| 3 strings | **~6.0 ns** |
-| 1 Vec\<String\> (via DebugArg) | **~33 ns** |
+| 1 integer (`i32`) | **~2.2 ns** |
+| 2 floats (`f64`) | **~2.4 ns** |
+| 3 strings (`&str`) | **~2.7 ns** |
+| 1 Vec\<String\> (via DebugArg) | **~2.1 ns** |
+| 1 HashMap\<String, String\> (via DebugArg) | **~2.3 ns** |
 
-Measured on x86_64 Linux with criterion. Includes timestamp acquisition,
-argument encoding, and SPSC queue push. Backend formatting and dispatch
-are not included.
+Measured with [criterion](https://crates.io/crates/criterion) on:
+
+- **CPU:** AMD Ryzen 9 7945HX @ ~2.5 GHz
+- **OS:** x86_64 Linux
+- **Rust:** 1.95.0 (2024 edition)
+
+Includes timestamp acquisition, schema buffer construction, argument encoding,
+and SPSC queue push. Backend formatting and dispatch are not included.
 
 ## Minimum Supported Rust Version
 
